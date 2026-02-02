@@ -1,0 +1,29 @@
+# secrets
+.env
+*.pem
+*.key
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.envrc
+
+# notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# logs / artifacts
+*.log
+
+# build artifacts
+dist/
+build/
+*.egg-info/
+
+# docker
+*.tar

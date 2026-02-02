@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ingest-pdga-event-pages"
+version = "0.1.0"
+description = "Bronze ingestion for PDGA event pages: fetch HTML, store raw to S3, parse discovery fields."
+requires-python = ">=3.10"
+dependencies = [
+  "boto3>=1.34",
+  "requests>=2.31",
+  "beautifulsoup4>=4.12",
+  "urllib3>=2.0",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+  "ruff>=0.4.0",
+]
+
+# This creates a CLI command named: ingest-pdga-event-pages
+# It will call ingest_pdga_event_pages/runner.py:main()
+[project.scripts]
+ingest-pdga-event-pages = "ingest_pdga_event_pages.runner:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ingest_pdga_event_pages*"]
