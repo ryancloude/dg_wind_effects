@@ -1,15 +1,22 @@
 # event_page_parser.py
 from __future__ import annotations
-import json
+
 import hashlib
+import json
 import re
 from datetime import datetime
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from bs4 import BeautifulSoup as bs
 
 
-# --- small utilities ---
+UNSCHEDULED_PLACEHOLDER_PATTERNS = (
+    re.compile(r"\bnot\s+scheduled\s+yet\b", re.IGNORECASE),
+    re.compile(r"\bevent\s+has\s+not\s+been\s+scheduled\b", re.IGNORECASE),
+    re.compile(r"\btournament\s+has\s+not\sF+been\s+scheduled\b", re.IGNORECASE),
+    re.compile(r"\bdetails\s+for\s+this\s+event\s+are\s+not\s+available\s+yet\b", re.IGNORECASE),
+)
+
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -17,6 +24,11 @@ def sha256_text(text: str) -> str:
 
 def safe_text(node, default: str = "") -> str:
     return node.get_text(" ", strip=True) if node else default
+
+
+def normalize_ws(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
 
 def idempotency_sha256(parsed: Dict[str, Any]) -> str:
     payload = {
@@ -26,35 +38,30 @@ def idempotency_sha256(parsed: Dict[str, Any]) -> str:
         "end_date": parsed.get("end_date", ""),
         "status_text": parsed.get("status_text", ""),
         "division_rounds": parsed.get("division_rounds", {}),
+        "is_unscheduled_placeholder": parsed.get("is_unscheduled_placeholder", False),
     }
-    s = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return sha256_text(s)
-
-
-# --- date parsing ---
-
-DATE_TOKEN_RE = re.compile(r"\b(\d{1,2}-[A-Za-z]{3}(?:-\d{4})?)\b")
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha256_text(serialized)
 
 
 def parse_date_range(raw: str) -> Tuple[str, str]:
     """
     Handles:
-      - '12-Apr-2025'
-      - '12-Apr-2025 to 13-Apr-2025'
-      - '12-Apr to 13-Apr-2025' (start missing year)
-      - '12-Apr-2025 – 13-Apr-2025' (en dash)
+      - 12-Apr-2025
+      - 12-Apr-2025 to 13-Apr-2025
+      - 12-Apr to 13-Apr-2025
+      - 12-Apr-2025 - 13-Apr-2025
     Returns (start_date, end_date) as YYYY-MM-DD.
     """
-    raw = raw.strip().replace("–", "to").replace("—", "to")
-    raw = re.sub(r"\s+", " ", raw)
+    normalized = normalize_ws(raw.replace("â€“", "to").replace("â€”", "to"))
+    normalized = re.sub(r"\s*-\s*", " to ", normalized, count=1) if " - " in normalized else normalized
 
-    if " to " not in raw:
-        dt = datetime.strptime(raw, "%d-%b-%Y").strftime("%Y-%m-%d")
+    if " to " not in normalized:
+        dt = datetime.strptime(normalized, "%d-%b-%Y").strftime("%Y-%m-%d")
         return dt, dt
 
-    left, right = [p.strip() for p in raw.split(" to ", 1)]
+    left, right = [part.strip() for part in normalized.split(" to ", 1)]
 
-    # end date should include year
     if re.search(r"-\d{4}$", right) is None:
         raise ValueError(f"End date missing year: {raw}")
 
@@ -75,12 +82,10 @@ def extract_date_str(soup: bs) -> str:
     node = soup.select_one("li.tournament-date")
     if node:
         raw = node.get_text(" ", strip=True)
-        # often like "Dates: 12-Apr-2025" or "Dates: 12-Apr to 13-Apr-2025"
         if ":" in raw:
             return raw.split(":", 1)[1].strip()
         return raw.strip()
 
-    # Fallback: scan for a line containing 'Dates:' or 'Date:'
     text = soup.get_text("\n", strip=True)
     for line in text.splitlines():
         lower = line.strip().lower()
@@ -90,62 +95,76 @@ def extract_date_str(soup: bs) -> str:
     raise ValueError("Could not find date on page")
 
 
-# --- status parsing ---
-
 def extract_status_text(soup: bs) -> str:
-    # 1) Structured selectors (fast + reliable when present)
     node = soup.select_one("td.status")
     if node:
         return node.get_text(" ", strip=True)
 
-    # 2) Text-block fallback for pages that render status as a label row
     text = soup.get_text("\n", strip=True)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
 
-    for i, line in enumerate(lines):
-        if line.lower() == "status total players" and i + 1 < len(lines):
-            nxt = lines[i + 1]
-            # Strip trailing player count if it’s jammed on the end
-            m = re.match(r"^(.*?)(\d+)$", nxt)
-            return m.group(1).strip() if m else nxt
+    for idx, line in enumerate(lines):
+        if line.lower() == "status total players" and idx + 1 < len(lines):
+            nxt = lines[idx + 1]
+            match = re.match(r"^(.*?)(\d+)$", nxt)
+            return match.group(1).strip() if match else nxt
 
     return ""
 
 
-# --- division / rounds parsing ---
-
 def find_division_rounds(soup: bs) -> Dict[str, int]:
     """
     For each division heading like:
-      'MA1 · Advanced (50)'
+      MA1 · Advanced (50)
     find the next results table and count Rd columns (Rd1, Rd2, ...).
     Return division -> max round number.
     """
     division_rounds: Dict[str, int] = {}
     round_pat = re.compile(r"\bRd(\d+)\b", re.IGNORECASE)
 
-    for h in soup.find_all(["h2", "h3", "h4"]):
-        title = h.get_text(" ", strip=True)
-        if "·" not in title:
+    for heading in soup.find_all(["h2", "h3", "h4"]):
+        title = normalize_ws(heading.get_text(" ", strip=True))
+        if "·" not in title and "Â·" not in title:
             continue
 
-        div_code = title.split("·", 1)[0].strip()
+        separator = "·" if "·" in title else "Â·"
+        div_code = title.split(separator, 1)[0].strip()
 
-        table = h.find_next("table")
+        table = heading.find_next("table")
         if not table:
             continue
 
         header = table.find("tr")
         header_text = header.get_text(" ", strip=True) if header else table.get_text(" ", strip=True)
 
-        rounds = {int(m.group(1)) for m in round_pat.finditer(header_text)}
+        rounds = {int(match.group(1)) for match in round_pat.finditer(header_text)}
         if rounds:
             division_rounds[div_code] = max(rounds)
 
     return division_rounds
 
 
-# --- main public function ---
+def looks_like_unscheduled_event_page(parsed: Dict[str, Any], soup: bs) -> bool:
+    """
+    Detect PDGA placeholder pages for tournament IDs that exist but are not scheduled yet.
+
+    The strongest signal is placeholder copy in the visible page text.
+    As a fallback, we also treat a page as a placeholder when all of the normal
+    tournament fields are absent and the page text still contains "scheduled" and "yet".
+    """
+    visible_text = normalize_ws(soup.get_text(" ", strip=True))
+    lower_text = visible_text.lower()
+
+    phrase_hit = any(pattern.search(visible_text) for pattern in UNSCHEDULED_PLACEHOLDER_PATTERNS)
+    if phrase_hit:
+        return True
+
+    missing_dates = not parsed.get("start_date") and not parsed.get("end_date")
+    missing_rounds = not parsed.get("division_rounds")
+    missing_status = not parsed.get("status_text")
+
+    return missing_dates and missing_rounds and missing_status and "scheduled" in lower_text and "yet" in lower_text
+
 
 def parse_event_page(event_id: int, html: str, source_url: Optional[str] = None) -> Dict[str, Any]:
     soup = bs(html, "html.parser")
@@ -158,8 +177,8 @@ def parse_event_page(event_id: int, html: str, source_url: Optional[str] = None)
     try:
         raw_date_str = extract_date_str(soup)
         start_date, end_date = parse_date_range(raw_date_str)
-    except Exception as e:
-        warnings.append(f"date_parse_failed:{e}")
+    except Exception as exc:
+        warnings.append(f"date_parse_failed:{exc}")
 
     status_text = extract_status_text(soup)
     if not status_text:
@@ -168,8 +187,6 @@ def parse_event_page(event_id: int, html: str, source_url: Optional[str] = None)
     division_rounds = find_division_rounds(soup)
     if not division_rounds:
         warnings.append("division_rounds_empty")
-
-    raw_html_sha256 = sha256_text(html)
 
     out = {
         "event_id": int(event_id),
@@ -181,9 +198,10 @@ def parse_event_page(event_id: int, html: str, source_url: Optional[str] = None)
         "status_text": status_text,
         "division_rounds": division_rounds,
         "content_sha256": sha256_text(html),
-        "parser_version": "event-page-v1",
+        "parser_version": "event-page-v2",
         "parse_warnings": warnings,
-        "raw_html_sha256": raw_html_sha256
+        "raw_html_sha256": sha256_text(html),
     }
+    out["is_unscheduled_placeholder"] = looks_like_unscheduled_event_page(out, soup)
     out["idempotency_sha256"] = idempotency_sha256(out)
     return out

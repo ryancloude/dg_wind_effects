@@ -19,12 +19,12 @@ def upsert_event_metadata(
     aws_region: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Upsert ONE item per event:
+    Upsert one item per event:
       pk = EVENT#<event_id>
       sk = METADATA
 
     Stores:
-      - discovery fields from parsed (name, dates, status, division_rounds, content_sha256, parser_version)
+      - parsed discovery fields
       - pointers to the latest raw HTML/meta in S3
       - timestamps (first_seen_at, last_fetched_at)
     """
@@ -35,35 +35,34 @@ def upsert_event_metadata(
 
     pk = f"EVENT#{event_id}"
     sk = "METADATA"
-
     now = utc_now_iso()
 
-    # Normalize division_rounds values to int (Dynamo stores numbers, boto3 handles ints fine)
-    division_rounds = {k: int(v) for k, v in (parsed.get("division_rounds") or {}).items()}
+    division_rounds = {key: int(value) for key, value in (parsed.get("division_rounds") or {}).items()}
 
     update_expr = """
     SET
-    event_id = :event_id,
-    source_url = :source_url,
-    #name = :name,
-    raw_date_str = :raw_date_str,
-    start_date = :start_date,
-    end_date = :end_date,
-    status_text = :status_text,
-    division_rounds = :division_rounds,
-    content_sha256 = :content_sha256,
-    parse_warnings = :parse_warnings,
-    parser_version = :parser_version,
-    latest_s3_html_key = :latest_s3_html_key,
-    latest_s3_meta_key = :latest_s3_meta_key,
-    last_fetched_at = :last_fetched_at,
-    first_seen_at = if_not_exists(first_seen_at, :first_seen_at),
-    idempotency_sha256 = :idempotency_sha256,
-    raw_html_sha256 = :raw_html_sha256
+        event_id = :event_id,
+        source_url = :source_url,
+        #name = :name,
+        raw_date_str = :raw_date_str,
+        start_date = :start_date,
+        end_date = :end_date,
+        status_text = :status_text,
+        division_rounds = :division_rounds,
+        content_sha256 = :content_sha256,
+        parse_warnings = :parse_warnings,
+        parser_version = :parser_version,
+        latest_s3_html_key = :latest_s3_html_key,
+        latest_s3_meta_key = :latest_s3_meta_key,
+        last_fetched_at = :last_fetched_at,
+        first_seen_at = if_not_exists(first_seen_at, :first_seen_at),
+        idempotency_sha256 = :idempotency_sha256,
+        raw_html_sha256 = :raw_html_sha256,
+        is_unscheduled_placeholder = :is_unscheduled_placeholder
     """
 
     expr_attr_names = {
-        "#name": "name",  # "name" is sometimes reserved-ish; this avoids surprises
+        "#name": "name",
     }
 
     expr_attr_values = {
@@ -84,6 +83,7 @@ def upsert_event_metadata(
         ":first_seen_at": now,
         ":idempotency_sha256": parsed.get("idempotency_sha256", ""),
         ":raw_html_sha256": parsed.get("raw_html_sha256", ""),
+        ":is_unscheduled_placeholder": bool(parsed.get("is_unscheduled_placeholder", False)),
     }
 
     resp = table.update_item(

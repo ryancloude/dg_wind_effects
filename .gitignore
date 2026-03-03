@@ -27,3 +27,6 @@ build/
 
 # docker
 *.tar
+
+AGENTS.md
+*.vscode
