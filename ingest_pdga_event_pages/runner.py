@@ -4,7 +4,7 @@ import argparse
 import itertools
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable
 
 from ingest_pdga_event_pages.config import load_config
 from ingest_pdga_event_pages.dynamo_reader import get_existing_content_sha256
@@ -79,6 +79,16 @@ def iter_explicit_event_ids(args) -> Iterable[int]:
     return list(range(start, end + 1))
 
 
+def update_unscheduled_streak(current_streak: int, is_unscheduled_placeholder: bool) -> int:
+    if is_unscheduled_placeholder:
+        return current_streak + 1
+    return 0
+
+
+def should_stop_backfill(unscheduled_streak: int, stop_after_unscheduled: int) -> bool:
+    return unscheduled_streak >= stop_after_unscheduled
+
+
 def process_event(
     *,
     event_id: int,
@@ -93,7 +103,6 @@ def process_event(
     status_code, html = get_event_page_html(session, http_cfg, event_id)
     parsed = parse_event_page(event_id=event_id, html=html, source_url=url)
 
-    existing_hash = None
     unchanged = False
     s3_ptrs: Dict[str, Any] = {}
     ddb_attrs: Dict[str, Any] = {}
@@ -226,10 +235,10 @@ def main() -> int:
             ok += 1
 
             if args.backfill_start_id is not None:
-                if result.parsed["is_unscheduled_placeholder"]:
-                    unscheduled_streak += 1
-                else:
-                    unscheduled_streak = 0
+                unscheduled_streak = update_unscheduled_streak(
+                    unscheduled_streak,
+                    result.parsed["is_unscheduled_placeholder"],
+                )
 
                 logger.info(
                     "backfill_progress",
@@ -240,7 +249,10 @@ def main() -> int:
                     },
                 )
 
-                if unscheduled_streak >= args.backfill_stop_after_unscheduled:
+                if should_stop_backfill(
+                    unscheduled_streak,
+                    args.backfill_stop_after_unscheduled,
+                ):
                     logger.info(
                         "backfill_stop_condition_met",
                         extra={
