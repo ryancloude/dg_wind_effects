@@ -19,6 +19,7 @@ logger = logging.getLogger("pdga_ingest")
 
 @dataclass(frozen=True)
 class ProcessResult:
+    """Structured result for one processed event page."""
     event_id: int
     parsed: Dict[str, Any]
     http_status: int
@@ -28,6 +29,7 @@ class ProcessResult:
 
 
 def positive_int(value: str) -> int:
+    """Argparse validator for positive integer CLI inputs."""
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be a positive integer")
@@ -69,6 +71,7 @@ def parse_args():
 
 
 def iter_explicit_event_ids(args) -> Iterable[int]:
+    """Expand explicit CLI inputs into a concrete list of event IDs."""
     if args.ids:
         return [int(value.strip()) for value in args.ids.split(",") if value.strip()]
 
@@ -80,12 +83,19 @@ def iter_explicit_event_ids(args) -> Iterable[int]:
 
 
 def update_unscheduled_streak(current_streak: int, is_unscheduled_placeholder: bool) -> int:
+    """
+    Maintain the consecutive-placeholder counter used by backfill mode.
+
+    Placeholder pages increment the streak.
+    Any scheduled event resets the streak to zero.
+    """
     if is_unscheduled_placeholder:
         return current_streak + 1
     return 0
 
 
 def should_stop_backfill(unscheduled_streak: int, stop_after_unscheduled: int) -> bool:
+    """Return True when the configured consecutive-placeholder stop condition is met."""
     return unscheduled_streak >= stop_after_unscheduled
 
 
@@ -98,6 +108,12 @@ def process_event(
     session,
     http_cfg: HttpConfig,
 ) -> ProcessResult:
+    """
+    Fetch, parse, and optionally persist a single PDGA event page.
+
+    Dry-run mode intentionally avoids all DynamoDB and S3 interaction so the
+    parser and control flow can be validated without AWS credentials.
+    """
     url = f"https://www.pdga.com/tour/event/{event_id}"
 
     status_code, html = get_event_page_html(session, http_cfg, event_id)
@@ -114,7 +130,7 @@ def process_event(
             aws_region=app_cfg.aws_region,
         )
         unchanged = bool(existing_hash and existing_hash == parsed["idempotency_sha256"])
-
+        # Skip writes when the parsed payload has not changed.
         if not unchanged:
             s3_ptrs = put_event_page_raw(
                 bucket=bucket,
@@ -143,6 +159,7 @@ def process_event(
 
 
 def log_event_result(result: ProcessResult) -> None:
+    """Emit a structured log entry plus a compact stdout record for one event."""
     parsed = result.parsed
 
     logger.info(
@@ -265,6 +282,7 @@ def main() -> int:
 
         except Exception as exc:
             failed += 1
+            # A failed fetch or parse should not count toward the placeholder stop rule.
             unscheduled_streak = 0
             logger.exception("event_failed", extra={"event_id": event_id, "error": str(exc)})
 

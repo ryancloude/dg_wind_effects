@@ -27,10 +27,17 @@ def safe_text(node, default: str = "") -> str:
 
 
 def normalize_ws(value: str) -> str:
+    """Collapse repeated whitespace so text matching is less brittle."""
     return re.sub(r"\s+", " ", value).strip()
 
 
 def idempotency_sha256(parsed: Dict[str, Any]) -> str:
+    """
+    Build a stable hash from the parsed payload.
+
+    This hash intentionally ignores storage metadata and focuses on fields that
+    define whether the event page meaningfully changed.
+    """
     payload = {
         "name": parsed.get("name", ""),
         "raw_date_str": parsed.get("raw_date_str", ""),
@@ -46,12 +53,13 @@ def idempotency_sha256(parsed: Dict[str, Any]) -> str:
 
 def parse_date_range(raw: str) -> Tuple[str, str]:
     """
-    Handles:
+    Parse PDGA event date text into ISO start and end dates.
+
+    Supported inputs include:
       - 12-Apr-2025
       - 12-Apr-2025 to 13-Apr-2025
       - 12-Apr to 13-Apr-2025
       - 12-Apr-2025 - 13-Apr-2025
-    Returns (start_date, end_date) as YYYY-MM-DD.
     """
     normalized = normalize_ws(raw.replace("â€“", "to").replace("â€”", "to"))
     normalized = re.sub(r"\s*-\s*", " to ", normalized, count=1) if " - " in normalized else normalized
@@ -76,8 +84,11 @@ def parse_date_range(raw: str) -> Tuple[str, str]:
 
 def extract_date_str(soup: bs) -> str:
     """
-    Prefer the structured tournament date element first.
-    Fall back to scanning page text.
+    Extract the raw PDGA date string from the page.
+
+    Prefer the structured tournament-date element. Fall back to page text
+    scanning because older or inconsistent PDGA pages do not always render
+    the same HTML structure.
     """
     node = soup.select_one("li.tournament-date")
     if node:
@@ -96,6 +107,12 @@ def extract_date_str(soup: bs) -> str:
 
 
 def extract_status_text(soup: bs) -> str:
+    """
+    Extract event status from either the structured table cell or a text fallback.
+
+    The fallback exists because some PDGA pages flatten label/value rows into
+    generic text blocks rather than preserving a clean status cell.
+    """
     node = soup.select_one("td.status")
     if node:
         return node.get_text(" ", strip=True)
@@ -114,10 +131,12 @@ def extract_status_text(soup: bs) -> str:
 
 def find_division_rounds(soup: bs) -> Dict[str, int]:
     """
-    For each division heading like:
+    Find the maximum round number shown for each division table.
+
+    This uses heading text such as:
       MA1 · Advanced (50)
-    find the next results table and count Rd columns (Rd1, Rd2, ...).
-    Return division -> max round number.
+
+    and scans the next table header for columns like Rd1, Rd2, Rd3.
     """
     division_rounds: Dict[str, int] = {}
     round_pat = re.compile(r"\bRd(\d+)\b", re.IGNORECASE)
@@ -146,11 +165,12 @@ def find_division_rounds(soup: bs) -> Dict[str, int]:
 
 def looks_like_unscheduled_event_page(parsed: Dict[str, Any], soup: bs) -> bool:
     """
-    Detect PDGA placeholder pages for tournament IDs that exist but are not scheduled yet.
+    Detect PDGA placeholder pages for event IDs that exist but are not scheduled yet.
 
-    The strongest signal is placeholder copy in the visible page text.
-    As a fallback, we also treat a page as a placeholder when all of the normal
-    tournament fields are absent and the page text still contains "scheduled" and "yet".
+    The strongest signal is explicit placeholder copy in the visible text.
+    As a fallback, the page is treated as a placeholder when dates, status,
+    and division rounds are all absent and the page text still suggests a
+    not-yet-scheduled event.
     """
     visible_text = normalize_ws(soup.get_text(" ", strip=True))
     lower_text = visible_text.lower()
@@ -167,6 +187,13 @@ def looks_like_unscheduled_event_page(parsed: Dict[str, Any], soup: bs) -> bool:
 
 
 def parse_event_page(event_id: int, html: str, source_url: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Parse a PDGA event page into a normalized metadata payload.
+
+    The parser is intentionally tolerant:
+    - missing fields become warnings rather than hard failures
+    - the raw HTML is still hashable and storable even when extraction is partial
+    """
     soup = bs(html, "html.parser")
 
     warnings = []
@@ -202,6 +229,8 @@ def parse_event_page(event_id: int, html: str, source_url: Optional[str] = None)
         "parse_warnings": warnings,
         "raw_html_sha256": sha256_text(html),
     }
+    # Placeholder classification is part of the parsed business meaning because
+    # backfill mode uses it to decide when to stop scanning sequential IDs.
     out["is_unscheduled_placeholder"] = looks_like_unscheduled_event_page(out, soup)
     out["idempotency_sha256"] = idempotency_sha256(out)
     return out
