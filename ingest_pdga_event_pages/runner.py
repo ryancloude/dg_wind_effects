@@ -13,12 +13,13 @@ from ingest_pdga_event_pages.config import load_config
 from ingest_pdga_event_pages.dynamo_reader import (
     get_existing_content_sha256,
     get_max_event_id,
-    iter_rescrape_event_ids,
+    iter_rescrape_event_ids_via_gsi,
 )
 from ingest_pdga_event_pages.dynamo_writer import upsert_event_metadata
 from ingest_pdga_event_pages.event_page_parser import parse_event_page
 from ingest_pdga_event_pages.http_client import HttpConfig, build_session, get_event_page_html, polite_sleep
 from ingest_pdga_event_pages.s3_writer import put_event_page_raw
+
 
 
 logger = logging.getLogger("pdga_ingest")
@@ -342,8 +343,9 @@ def main() -> int:
         today = date.today()
         window_start = today - timedelta(days=args.incremental_window_days)
 
-        candidate_ids = iter_rescrape_event_ids(
+        candidate_ids = iter_rescrape_event_ids_via_gsi(
             table_name=app_cfg.ddb_table,
+            gsi_name=app_cfg.ddb_status_end_date_gsi,
             status_texts=statuses,
             start_date=window_start.isoformat(),
             end_before_date=today.isoformat(),

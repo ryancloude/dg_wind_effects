@@ -43,80 +43,6 @@ def test_get_existing_content_sha256_returns_hash(monkeypatch):
     assert result == "abc123"
 
 
-def test_iter_rescrape_event_ids_filters_by_status_and_date(monkeypatch):
-    table = Mock()
-    table.scan.side_effect = [
-        {
-            "Items": [
-                {
-                    "event_id": 1001,
-                    "sk": "METADATA",
-                    "status_text": "Sanctioned",
-                    "end_date": "2026-02-01",
-                },
-                {
-                    "event_id": 1002,
-                    "sk": "METADATA",
-                    "status_text": "Event complete.",
-                    "end_date": "2026-02-01",
-                },
-                {
-                    "event_id": 1003,
-                    "sk": "METADATA",
-                    "status_text": "Sanctioned",
-                    "end_date": "2025-08-01",
-                },
-                {
-                    "event_id": 1004,
-                    "sk": "METADATA",
-                    "status_text": "Sanctioned",
-                    "end_date": "2026-03-10",
-                },
-                {
-                    "event_id": 1005,
-                    "sk": "OTHER",
-                    "status_text": "Sanctioned",
-                    "end_date": "2026-02-01",
-                },
-            ],
-            "LastEvaluatedKey": {"pk": "next"},
-        },
-        {
-            "Items": [
-                {
-                    "event_id": 1006,
-                    "sk": "METADATA",
-                    "status_text": "Errata pending.",
-                    "end_date": "2026-01-15",
-                },
-                {
-                    "event_id": 1007,
-                    "sk": "METADATA",
-                    "status_text": "Sanctioned",
-                    "end_date": "",
-                },
-            ]
-        },
-    ]
-
-    resource = Mock()
-    resource.Table.return_value = table
-
-    monkeypatch.setattr(dynamo_reader.boto3, "resource", lambda *args, **kwargs: resource)
-
-    event_ids = list(
-        dynamo_reader.iter_rescrape_event_ids(
-            table_name="pdga-table",
-            status_texts=["Sanctioned", "Errata pending."],
-            start_date="2025-09-04",
-            end_before_date="2026-03-04",
-            aws_region="us-east-1",
-        )
-    )
-
-    assert event_ids == [1001, 1006]
-
-
 def test_get_max_event_id_returns_largest_metadata_event_id(monkeypatch):
     table = Mock()
     table.scan.side_effect = [
@@ -147,3 +73,89 @@ def test_get_max_event_id_returns_largest_metadata_event_id(monkeypatch):
     )
 
     assert result == 1022
+
+
+def test_iter_rescrape_event_ids_via_gsi_filters_and_returns_metadata_event_ids(monkeypatch):
+    table = Mock()
+    table.query.side_effect = [
+        # status: Sanctioned
+        {
+            "Items": [
+                {
+                    "event_id": 1001,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-01",
+                },
+                {
+                    "event_id": 1005,
+                    "sk": "OTHER",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-01",
+                },
+            ],
+            "LastEvaluatedKey": {"pk": "next"},
+        },
+        {
+            "Items": [
+                {
+                    "event_id": 1002,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-02",
+                },
+            ]
+        },
+        # status: Errata pending.
+        {
+            "Items": [
+                {
+                    "event_id": 1003,
+                    "sk": "METADATA",
+                    "status_text": "Errata pending.",
+                    "end_date": "2026-01-15",
+                },
+            ]
+        },
+    ]
+
+    resource = Mock()
+    resource.Table.return_value = table
+
+    monkeypatch.setattr(dynamo_reader.boto3, "resource", lambda *args, **kwargs: resource)
+
+    result = list(
+        dynamo_reader.iter_rescrape_event_ids_via_gsi(
+            table_name="pdga-table",
+            gsi_name="gsi_status_end_date",
+            status_texts=["Sanctioned", "Errata pending."],
+            start_date="2025-09-04",
+            end_before_date="2026-03-04",
+            aws_region="us-east-1",
+        )
+    )
+
+    assert result == [1001, 1002, 1003]
+    assert table.query.call_count == 3
+
+
+def test_iter_rescrape_event_ids_via_gsi_returns_empty_when_window_invalid(monkeypatch):
+    table = Mock()
+    resource = Mock()
+    resource.Table.return_value = table
+
+    monkeypatch.setattr(dynamo_reader.boto3, "resource", lambda *args, **kwargs: resource)
+
+    result = list(
+        dynamo_reader.iter_rescrape_event_ids_via_gsi(
+            table_name="pdga-table",
+            gsi_name="gsi_status_end_date",
+            status_texts=["Sanctioned"],
+            start_date="2026-03-05",
+            end_before_date="2026-03-04",
+            aws_region="us-east-1",
+        )
+    )
+
+    assert result == []
+    table.query.assert_not_called()

@@ -1,5 +1,4 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import requests
 
@@ -131,17 +130,27 @@ def test_main_incremental_uses_default_statuses(monkeypatch):
     monkeypatch.setattr(
         runner,
         "load_config",
-        lambda: SimpleNamespace(s3_bucket="bucket", ddb_table="table", aws_region="us-east-1"),
+        lambda: SimpleNamespace(
+            s3_bucket="bucket",
+            ddb_table="table",
+            aws_region="us-east-1",
+            ddb_status_end_date_gsi="gsi_status_end_date",
+        ),
     )
     monkeypatch.setattr(runner, "build_session", lambda cfg: "session")
 
     captured = {}
 
-    def fake_iter_rescrape_event_ids(**kwargs):
+    def fake_iter_rescrape_event_ids_via_gsi(**kwargs):
         captured["statuses"] = kwargs["status_texts"]
+        captured["gsi_name"] = kwargs["gsi_name"]
         return iter([101, 102])
 
-    monkeypatch.setattr(runner, "iter_rescrape_event_ids", fake_iter_rescrape_event_ids)
+    monkeypatch.setattr(
+        runner,
+        "iter_rescrape_event_ids_via_gsi",
+        fake_iter_rescrape_event_ids_via_gsi,
+    )
     monkeypatch.setattr(runner, "run_event_sequence", lambda **kwargs: (2, 0))
     monkeypatch.setattr(runner, "get_max_event_id", lambda **kwargs: 5000)
     monkeypatch.setattr(runner, "run_forward_scan", lambda **kwargs: (3, 0))
@@ -150,3 +159,4 @@ def test_main_incremental_uses_default_statuses(monkeypatch):
 
     assert exit_code == 0
     assert captured["statuses"] == list(runner.DEFAULT_INCREMENTAL_STATUSES)
+    assert captured["gsi_name"] == "gsi_status_end_date"
