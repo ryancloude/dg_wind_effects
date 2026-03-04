@@ -55,7 +55,7 @@ def test_run_forward_scan_counts_404_toward_stop(monkeypatch):
     monkeypatch.setattr(runner, "process_event", fake_process_event)
     monkeypatch.setattr(runner, "polite_sleep", lambda cfg: None)
 
-    ok, failed = runner.run_forward_scan(
+    stats = runner.run_forward_scan(
         start_event_id=1000,
         stop_after_unscheduled=3,
         max_event_id=None,
@@ -66,8 +66,9 @@ def test_run_forward_scan_counts_404_toward_stop(monkeypatch):
         http_cfg=http_cfg,
     )
 
-    assert ok == 3
-    assert failed == 0
+    assert stats.scraped == 0
+    assert stats.not_found_404 == 3
+    assert stats.failed == 0
     assert calls["n"] == 3
 
 
@@ -93,7 +94,7 @@ def test_run_forward_scan_resets_streak_on_non_404_error(monkeypatch):
     monkeypatch.setattr(runner, "process_event", fake_process_event)
     monkeypatch.setattr(runner, "polite_sleep", lambda cfg: None)
 
-    ok, failed = runner.run_forward_scan(
+    stats = runner.run_forward_scan(
         start_event_id=2000,
         stop_after_unscheduled=3,
         max_event_id=2004,
@@ -104,11 +105,12 @@ def test_run_forward_scan_resets_streak_on_non_404_error(monkeypatch):
         http_cfg=http_cfg,
     )
 
-    assert ok == 4
-    assert failed == 1
+    assert stats.scraped == 0
+    assert stats.not_found_404 == 4
+    assert stats.failed == 1
 
 
-def test_main_incremental_uses_default_statuses(monkeypatch):
+def test_main_incremental_uses_default_statuses_and_emits_candidate_count(monkeypatch):
     args = SimpleNamespace(
         ids=None,
         range=None,
@@ -140,23 +142,51 @@ def test_main_incremental_uses_default_statuses(monkeypatch):
     monkeypatch.setattr(runner, "build_session", lambda cfg: "session")
 
     captured = {}
+    printed = []
 
     def fake_iter_rescrape_event_ids_via_gsi(**kwargs):
         captured["statuses"] = kwargs["status_texts"]
         captured["gsi_name"] = kwargs["gsi_name"]
         return iter([101, 102])
 
+    def fake_print(obj):
+        printed.append(obj)
+
     monkeypatch.setattr(
         runner,
         "iter_rescrape_event_ids_via_gsi",
         fake_iter_rescrape_event_ids_via_gsi,
     )
-    monkeypatch.setattr(runner, "run_event_sequence", lambda **kwargs: (2, 0))
+    monkeypatch.setattr(
+        runner,
+        "run_event_sequence",
+        lambda **kwargs: runner.RunStats(scraped=2, updated_scraped=1, unchanged_scraped=1),
+    )
     monkeypatch.setattr(runner, "get_max_event_id", lambda **kwargs: 5000)
-    monkeypatch.setattr(runner, "run_forward_scan", lambda **kwargs: (3, 0))
+    monkeypatch.setattr(
+        runner,
+        "run_forward_scan",
+        lambda **kwargs: runner.RunStats(scraped=3, new_scraped=2, unchanged_scraped=1, not_found_404=4),
+    )
+    monkeypatch.setattr(runner, "print", fake_print)
 
     exit_code = runner.main()
 
     assert exit_code == 0
     assert captured["statuses"] == list(runner.DEFAULT_INCREMENTAL_STATUSES)
     assert captured["gsi_name"] == "gsi_status_end_date"
+
+    # Candidate count output
+    assert {"incremental_rescrape_candidate_count": 2} in printed
+
+    # End summary output
+    summary_items = [x for x in printed if "incremental_summary" in x]
+    assert len(summary_items) == 1
+    summary = summary_items[0]["incremental_summary"]
+
+    assert summary["updated_scraped"] == 1
+    assert summary["new_scraped"] == 2
+    assert summary["unchanged_scraped"] == 2
+    assert summary["scraped_total"] == 5
+    assert summary["not_found_404"] == 4
+    assert summary["failed"] == 0

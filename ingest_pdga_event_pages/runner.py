@@ -21,7 +21,6 @@ from ingest_pdga_event_pages.http_client import HttpConfig, build_session, get_e
 from ingest_pdga_event_pages.s3_writer import put_event_page_raw
 
 
-
 logger = logging.getLogger("pdga_ingest")
 
 DEFAULT_INCREMENTAL_WINDOW_DAYS = 183
@@ -42,6 +41,35 @@ class ProcessResult:
     s3_ptrs: Dict[str, Any]
     ddb_attrs: Dict[str, Any]
     unchanged: bool
+    change_type: str  # "new" | "updated" | "unchanged" | "unknown"
+
+
+@dataclass
+class RunStats:
+    scraped: int = 0
+    new_scraped: int = 0
+    updated_scraped: int = 0
+    unchanged_scraped: int = 0
+    not_found_404: int = 0
+    failed: int = 0
+
+    def merge(self, other: "RunStats") -> None:
+        self.scraped += other.scraped
+        self.new_scraped += other.new_scraped
+        self.updated_scraped += other.updated_scraped
+        self.unchanged_scraped += other.unchanged_scraped
+        self.not_found_404 += other.not_found_404
+        self.failed += other.failed
+
+    def to_dict(self) -> Dict[str, int]:
+        return {
+            "scraped": self.scraped,
+            "new_scraped": self.new_scraped,
+            "updated_scraped": self.updated_scraped,
+            "unchanged_scraped": self.unchanged_scraped,
+            "not_found_404": self.not_found_404,
+            "failed": self.failed,
+        }
 
 
 def positive_int(value: str) -> int:
@@ -63,6 +91,7 @@ def parse_args():
         "--incremental-statuses",
         help="Optional override for incremental statuses, comma-separated. If omitted, defaults are used.",
     )
+    p.add_argument("--incremental-window-days", type=positive_int, default=DEFAULT_INCREMENTAL_WINDOW_DAYS)
 
     p.add_argument("--bucket")
     p.add_argument("--dry-run", action="store_true")
@@ -72,8 +101,18 @@ def parse_args():
     p.add_argument("--log-level", default="INFO")
     p.add_argument("--backfill-stop-after-unscheduled", type=positive_int, default=5)
     p.add_argument("--backfill-max-event-id", type=positive_int)
-    p.add_argument("--incremental-window-days", type=positive_int, default=DEFAULT_INCREMENTAL_WINDOW_DAYS)
     return p.parse_args()
+
+
+def iter_explicit_event_ids(args) -> Iterable[int]:
+    if args.ids:
+        return [int(x.strip()) for x in args.ids.split(",") if x.strip()]
+
+    start_s, end_s = args.range.split("-", 1)
+    start, end = int(start_s), int(end_s)
+    if end < start:
+        raise ValueError(f"range end must be >= start: {args.range}")
+    return list(range(start, end + 1))
 
 
 def parse_status_list(raw_statuses: str) -> list[str]:
@@ -99,42 +138,6 @@ def should_stop_backfill(streak: int, threshold: int) -> bool:
     return streak >= threshold
 
 
-def iter_explicit_event_ids(args) -> Iterable[int]:
-    """Expand explicit CLI inputs into a concrete list of event IDs."""
-    if args.ids:
-        return [int(x.strip()) for x in args.ids.split(",") if x.strip()]
-
-    start_s, end_s = args.range.split("-", 1)
-    start, end = int(start_s), int(end_s)
-    if end < start:
-        raise ValueError(f"range end must be >= start: {args.range}")
-    return list(range(start, end + 1))
-
-
-def parse_status_list(raw_statuses: str) -> list[str]:
-    values = [value.strip() for value in raw_statuses.split(",") if value.strip()]
-    if not values:
-        raise ValueError("--incremental-statuses requires at least one status_text value")
-    return values
-
-
-def update_unscheduled_streak(current_streak: int, is_unscheduled_placeholder: bool) -> int:
-    """
-    Maintain the consecutive-placeholder counter used by backfill and incremental forward scan.
-
-    Placeholder pages increment the streak.
-    Any scheduled event resets the streak to zero.
-    """
-    if is_unscheduled_placeholder:
-        return current_streak + 1
-    return 0
-
-
-def should_stop_backfill(unscheduled_streak: int, stop_after_unscheduled: int) -> bool:
-    """Return True when the configured consecutive-placeholder stop condition is met."""
-    return unscheduled_streak >= stop_after_unscheduled
-
-
 def process_event(
     *,
     event_id: int,
@@ -144,12 +147,6 @@ def process_event(
     session,
     http_cfg: HttpConfig,
 ) -> ProcessResult:
-    """
-    Fetch, parse, and optionally persist a single PDGA event page.
-
-    Dry-run mode intentionally avoids all DynamoDB and S3 interaction so the
-    parser and control flow can be validated without AWS credentials.
-    """
     url = f"https://www.pdga.com/tour/event/{event_id}"
 
     status_code, html = get_event_page_html(session, http_cfg, event_id)
@@ -158,6 +155,7 @@ def process_event(
     unchanged = False
     s3_ptrs: Dict[str, Any] = {}
     ddb_attrs: Dict[str, Any] = {}
+    change_type = "unknown"
 
     if not dry_run:
         existing_hash = get_existing_content_sha256(
@@ -165,10 +163,13 @@ def process_event(
             event_id=event_id,
             aws_region=app_cfg.aws_region,
         )
+
         unchanged = bool(existing_hash and existing_hash == parsed["idempotency_sha256"])
 
-        # Skip writes when the parsed business payload has not changed.
-        if not unchanged:
+        if unchanged:
+            change_type = "unchanged"
+        else:
+            change_type = "updated" if existing_hash else "new"
             s3_ptrs = put_event_page_raw(
                 bucket=bucket,
                 event_id=event_id,
@@ -192,37 +193,22 @@ def process_event(
         s3_ptrs=s3_ptrs,
         ddb_attrs=ddb_attrs,
         unchanged=unchanged,
+        change_type=change_type,
     )
 
 
 def log_event_result(result: ProcessResult) -> None:
-    """Emit a structured log entry plus a compact stdout record for one event."""
     parsed = result.parsed
-
     logger.info(
         "event_ok",
         extra={
             "event_id": result.event_id,
-            "unchanged": result.unchanged,
+            "change_type": result.change_type,
             "is_unscheduled_placeholder": parsed["is_unscheduled_placeholder"],
+            "status_text": parsed["status_text"],
             "divisions": len(parsed["division_rounds"]),
-            "status_text": parsed["status_text"],
             "s3_html_key": result.s3_ptrs.get("s3_html_key"),
-            "ddb_pk": result.ddb_attrs.get("pk"),
         },
-    )
-
-    print(
-        {
-            "event_id": result.event_id,
-            "name": parsed["name"],
-            "status_text": parsed["status_text"],
-            "division_rounds": parsed["division_rounds"],
-            "is_unscheduled_placeholder": parsed["is_unscheduled_placeholder"],
-            "unchanged": result.unchanged,
-            "s3_html_key": result.s3_ptrs.get("s3_html_key"),
-            "ddb_pk": result.ddb_attrs.get("pk"),
-        }
     )
 
 
@@ -234,12 +220,8 @@ def run_event_sequence(
     app_cfg,
     session,
     http_cfg: HttpConfig,
-) -> tuple[int, int]:
-    """
-    Process a finite list or iterator of explicit event IDs.
-    """
-    ok = 0
-    failed = 0
+) -> RunStats:
+    stats = RunStats()
 
     for event_id in event_ids:
         try:
@@ -251,20 +233,23 @@ def run_event_sequence(
                 session=session,
                 http_cfg=http_cfg,
             )
-
-            if result.unchanged:
-                logger.info("event_unchanged", extra={"event_id": event_id})
-
             log_event_result(result)
-            ok += 1
+
+            stats.scraped += 1
+            if result.change_type == "new":
+                stats.new_scraped += 1
+            elif result.change_type == "updated":
+                stats.updated_scraped += 1
+            elif result.change_type == "unchanged":
+                stats.unchanged_scraped += 1
 
         except Exception as exc:
-            failed += 1
+            stats.failed += 1
             logger.exception("event_failed", extra={"event_id": event_id, "error": str(exc)})
 
         polite_sleep(http_cfg)
 
-    return ok, failed
+    return stats
 
 
 def run_forward_scan(
@@ -277,9 +262,8 @@ def run_forward_scan(
     app_cfg,
     session,
     http_cfg: HttpConfig,
-) -> tuple[int, int]:
-    ok = 0
-    failed = 0
+) -> RunStats:
+    stats = RunStats()
     no_event_streak = 0
 
     for event_id in itertools.count(start_event_id):
@@ -296,63 +280,80 @@ def run_forward_scan(
                 http_cfg=http_cfg,
             )
             log_event_result(result)
-            ok += 1
+
+            stats.scraped += 1
+            if result.change_type == "new":
+                stats.new_scraped += 1
+            elif result.change_type == "updated":
+                stats.updated_scraped += 1
+            elif result.change_type == "unchanged":
+                stats.unchanged_scraped += 1
 
             no_event_streak = update_no_event_streak(
                 no_event_streak,
                 is_unscheduled_placeholder=result.parsed["is_unscheduled_placeholder"],
             )
-
             if should_stop_backfill(no_event_streak, stop_after_unscheduled):
                 break
 
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
             if status_code == 404:
-                ok += 1
+                stats.not_found_404 += 1
                 no_event_streak = update_no_event_streak(no_event_streak, is_not_found_404=True)
                 if should_stop_backfill(no_event_streak, stop_after_unscheduled):
                     break
             else:
-                failed += 1
+                stats.failed += 1
                 no_event_streak = 0
+                logger.exception("event_failed", extra={"event_id": event_id, "error": str(exc)})
 
-        except Exception:
-            failed += 1
+        except Exception as exc:
+            stats.failed += 1
             no_event_streak = 0
+            logger.exception("event_failed", extra={"event_id": event_id, "error": str(exc)})
 
         polite_sleep(http_cfg)
 
-    return ok, failed
+    return stats
 
 
 def main() -> int:
     args = parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
     app_cfg = load_config()
     bucket = args.bucket or app_cfg.s3_bucket
     http_cfg = HttpConfig(timeout_s=args.timeout, base_sleep_s=args.sleep_base, jitter_s=args.sleep_jitter)
     session = build_session(http_cfg)
 
-    total_ok = 0
-    total_failed = 0
+    total = RunStats()
 
     if args.incremental:
         statuses = resolve_incremental_statuses(args)
         today = date.today()
         window_start = today - timedelta(days=args.incremental_window_days)
 
-        candidate_ids = iter_rescrape_event_ids_via_gsi(
-            table_name=app_cfg.ddb_table,
-            gsi_name=app_cfg.ddb_status_end_date_gsi,
-            status_texts=statuses,
-            start_date=window_start.isoformat(),
-            end_before_date=today.isoformat(),
-            aws_region=app_cfg.aws_region,
+        candidate_ids = list(
+            iter_rescrape_event_ids_via_gsi(
+                table_name=app_cfg.ddb_table,
+                gsi_name=app_cfg.ddb_status_end_date_gsi,
+                status_texts=statuses,
+                start_date=window_start.isoformat(),
+                end_before_date=today.isoformat(),
+                aws_region=app_cfg.aws_region,
+            )
         )
 
-        ok, failed = run_event_sequence(
+        candidate_count = len(candidate_ids)
+        logger.info("incremental_rescrape_candidate_count", extra={"candidate_count": candidate_count})
+        print({"incremental_rescrape_candidate_count": candidate_count})
+
+        rescrape_stats = run_event_sequence(
             event_ids=candidate_ids,
             bucket=bucket,
             dry_run=args.dry_run,
@@ -360,14 +361,13 @@ def main() -> int:
             session=session,
             http_cfg=http_cfg,
         )
-        total_ok += ok
-        total_failed += failed
+        total.merge(rescrape_stats)
 
         max_known_event_id = get_max_event_id(table_name=app_cfg.ddb_table, aws_region=app_cfg.aws_region)
         if max_known_event_id is None:
             raise RuntimeError("Could not determine max known event_id for incremental forward scan")
 
-        ok, failed = run_forward_scan(
+        forward_stats = run_forward_scan(
             start_event_id=max_known_event_id + 1,
             stop_after_unscheduled=args.backfill_stop_after_unscheduled,
             max_event_id=args.backfill_max_event_id,
@@ -377,11 +377,21 @@ def main() -> int:
             session=session,
             http_cfg=http_cfg,
         )
-        total_ok += ok
-        total_failed += failed
+        total.merge(forward_stats)
+
+        summary = {
+            "updated_scraped": total.updated_scraped,
+            "new_scraped": total.new_scraped,
+            "unchanged_scraped": total.unchanged_scraped,
+            "scraped_total": total.scraped,
+            "not_found_404": total.not_found_404,
+            "failed": total.failed,
+        }
+        logger.info("incremental_summary", extra=summary)
+        print({"incremental_summary": summary})
 
     elif args.backfill_start_id is not None:
-        ok, failed = run_forward_scan(
+        stats = run_forward_scan(
             start_event_id=args.backfill_start_id,
             stop_after_unscheduled=args.backfill_stop_after_unscheduled,
             max_event_id=args.backfill_max_event_id,
@@ -391,11 +401,10 @@ def main() -> int:
             session=session,
             http_cfg=http_cfg,
         )
-        total_ok += ok
-        total_failed += failed
+        total.merge(stats)
 
     else:
-        ok, failed = run_event_sequence(
+        stats = run_event_sequence(
             event_ids=iter_explicit_event_ids(args),
             bucket=bucket,
             dry_run=args.dry_run,
@@ -403,7 +412,11 @@ def main() -> int:
             session=session,
             http_cfg=http_cfg,
         )
-        total_ok += ok
-        total_failed += failed
+        total.merge(stats)
 
-    return 0 if total_failed == 0 else 2
+    logger.info("summary", extra=total.to_dict())
+    return 0 if total.failed == 0 else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
