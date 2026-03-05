@@ -168,7 +168,7 @@ def test_main_incremental_uses_default_statuses_and_emits_candidate_count(monkey
         "run_forward_scan",
         lambda **kwargs: runner.RunStats(scraped=3, new_scraped=2, unchanged_scraped=1, not_found_404=4),
     )
-    monkeypatch.setattr(runner, "print", fake_print)
+    monkeypatch.setattr(runner, "print", fake_print, raising=False)
 
     exit_code = runner.main()
 
