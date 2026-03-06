@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from decimal import Decimal, InvalidOperation
+from typing import Any, Iterable, Iterator, Optional
+
+import boto3
+from boto3.dynamodb.conditions import Attr
 
 
 @dataclass(frozen=True)
@@ -18,20 +22,25 @@ class LiveResultsTask:
         }
 
 
+def _coerce_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, Decimal):
+        try:
+            if value != value.to_integral_value():
+                return None
+            parsed = int(value)
+            return parsed if parsed > 0 else None
+        except (InvalidOperation, ValueError):
+            return None
+    return None
+
+
 def expand_tasks_from_metadata_item(metadata_item: dict[str, Any]) -> list[LiveResultsTask]:
-    """
-    Expand a single METADATA DynamoDB item into live-results fetch tasks.
-
-    Required fields:
-      - event_id: str
-      - division_rounds: dict[str, int] where value is max round for that division
-
-    Example:
-      {"event_id": "86076", "division_rounds": {"MP40": 3, "MA1": 2}}
-    -> tasks:
-      (86076, MP40, 1..3), (86076, MA1, 1..2)
-    """
-    event_id = str(metadata_item.get("event_id", "")).strip()
+    event_id_raw = metadata_item.get("event_id", "")
+    event_id = str(event_id_raw).strip()
     if not event_id:
         return []
 
@@ -40,14 +49,13 @@ def expand_tasks_from_metadata_item(metadata_item: dict[str, Any]) -> list[LiveR
         return []
 
     tasks: list[LiveResultsTask] = []
-    for division, max_round in division_rounds.items():
+    for division, max_round_raw in division_rounds.items():
         division_code = str(division).strip()
         if not division_code:
             continue
 
-        if not isinstance(max_round, int):
-            continue
-        if max_round < 1:
+        max_round = _coerce_positive_int(max_round_raw)
+        if max_round is None:
             continue
 
         for round_number in range(1, max_round + 1):
@@ -58,82 +66,56 @@ def expand_tasks_from_metadata_item(metadata_item: dict[str, Any]) -> list[LiveR
                     round_number=round_number,
                 )
             )
-
     return tasks
 
 
 def expand_tasks_from_metadata_items(metadata_items: Iterable[dict[str, Any]]) -> list[LiveResultsTask]:
-    """
-    Expand many METADATA items into one flat task list.
-    """
-    all_tasks: list[LiveResultsTask] = []
+    tasks: list[LiveResultsTask] = []
     for item in metadata_items:
-        all_tasks.extend(expand_tasks_from_metadata_item(item))
-    return all_tasks
+        tasks.extend(expand_tasks_from_metadata_item(item))
+    return tasks
 
 
-def list_metadata_items(
-    dynamodb_client: Any,
+def iter_metadata_items(
+    *,
     table_name: str,
-    metadata_sk_value: str = "METADATA",
-) -> list[dict[str, Any]]:
-    """
-    Read METADATA items from pdga-event-index.
-    This function assumes the table has an 'SK' attribute and METADATA rows use SK='METADATA'.
+    event_ids: Optional[list[int]] = None,
+    aws_region: Optional[str] = None,
+) -> Iterator[dict[str, Any]]:
+    ddb = boto3.resource("dynamodb", region_name=aws_region) if aws_region else boto3.resource("dynamodb")
+    table = ddb.Table(table_name)
 
-    If your key attribute names differ (e.g., sk), adapt this filter to match your existing table.
-    """
-    scan_kwargs: dict[str, Any] = {
-        "TableName": table_name,
-        "FilterExpression": "SK = :metadata_sk",
-        "ExpressionAttributeValues": {
-            ":metadata_sk": {"S": metadata_sk_value},
-        },
-    }
+    if event_ids:
+        for event_id in event_ids:
+            resp = table.get_item(Key={"pk": f"EVENT#{int(event_id)}", "sk": "METADATA"}, ConsistentRead=False)
+            item = resp.get("Item")
+            if item:
+                yield item
+        return
 
-    items: list[dict[str, Any]] = []
+    last_evaluated_key = None
     while True:
-        response = dynamodb_client.scan(**scan_kwargs)
-        items.extend(response.get("Items", []))
-        last_evaluated_key = response.get("LastEvaluatedKey")
+        scan_kwargs: dict[str, Any] = {
+            "FilterExpression": Attr("sk").eq("METADATA"),
+            "ProjectionExpression": "event_id, division_rounds, pk, sk",
+        }
+        if last_evaluated_key:
+            scan_kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+        resp = table.scan(**scan_kwargs)
+        for item in resp.get("Items", []):
+            yield item
+
+        last_evaluated_key = resp.get("LastEvaluatedKey")
         if not last_evaluated_key:
             break
-        scan_kwargs["ExclusiveStartKey"] = last_evaluated_key
-
-    return items
-
-
-def deserialize_metadata_items(
-    dynamodb_deserializer: Any,
-    raw_items: Iterable[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """
-    Convert low-level DynamoDB AttributeValue maps into plain Python dicts.
-
-    Expects dynamodb_deserializer to expose:
-      deserialize(attribute_value) -> python_value
-    Example: boto3.dynamodb.types.TypeDeserializer()
-    """
-    output: list[dict[str, Any]] = []
-    for item in raw_items:
-        parsed: dict[str, Any] = {}
-        for key, value in item.items():
-            parsed[key] = dynamodb_deserializer.deserialize(value)
-        output.append(parsed)
-    return output
 
 
 def load_live_results_tasks(
-    dynamodb_client: Any,
-    dynamodb_deserializer: Any,
+    *,
     table_name: str,
+    event_ids: Optional[list[int]] = None,
+    aws_region: Optional[str] = None,
 ) -> list[LiveResultsTask]:
-    """
-    End-to-end reader entrypoint:
-      1) read METADATA items from DynamoDB
-      2) deserialize items
-      3) expand into (event_id, division, round) tasks
-    """
-    raw_items = list_metadata_items(dynamodb_client=dynamodb_client, table_name=table_name)
-    metadata_items = deserialize_metadata_items(dynamodb_deserializer=dynamodb_deserializer, raw_items=raw_items)
+    metadata_items = list(iter_metadata_items(table_name=table_name, event_ids=event_ids, aws_region=aws_region))
     return expand_tasks_from_metadata_items(metadata_items)
