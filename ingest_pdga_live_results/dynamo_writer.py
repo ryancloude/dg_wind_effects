@@ -107,3 +107,31 @@ def put_live_results_run_summary(
     }
     table.put_item(Item=item)
     return item
+
+def mark_event_live_results_ingested(
+    *,
+    table_name: str,
+    event_id: int,
+    run_id: str,
+    aws_region: Optional[str] = None,
+) -> Dict[str, Any]:
+    ddb = boto3.resource("dynamodb", region_name=aws_region) if aws_region else boto3.resource("dynamodb")
+    table = ddb.Table(table_name)
+
+    now = utc_now_iso()
+    resp = table.update_item(
+        Key={"pk": f"EVENT#{int(event_id)}", "sk": "METADATA"},
+        UpdateExpression="""
+        SET
+            live_results_ingested = :true_value,
+            live_results_ingested_at = :ingested_at,
+            live_results_ingested_run_id = :run_id
+        """,
+        ExpressionAttributeValues={
+            ":true_value": True,
+            ":ingested_at": now,
+            ":run_id": run_id,
+        },
+        ReturnValues="ALL_NEW",
+    )
+    return resp.get("Attributes", {})
