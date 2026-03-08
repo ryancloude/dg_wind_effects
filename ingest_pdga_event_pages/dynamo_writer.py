@@ -1,4 +1,3 @@
-# ingest_pdga_event_pages/dynamo_writer.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -22,11 +21,6 @@ def upsert_event_metadata(
     Upsert one item per event:
       pk = EVENT#<event_id>
       sk = METADATA
-
-    Stores:
-      - parsed discovery fields
-      - pointers to the latest raw HTML/meta in S3
-      - timestamps (first_seen_at, last_fetched_at)
     """
     event_id = int(parsed["event_id"])
 
@@ -49,6 +43,10 @@ def upsert_event_metadata(
         end_date = :end_date,
         status_text = :status_text,
         division_rounds = :division_rounds,
+        location_raw = :location_raw,
+        city = :city,
+        #state = :state,
+        country = :country,
         content_sha256 = :content_sha256,
         parse_warnings = :parse_warnings,
         parser_version = :parser_version,
@@ -63,6 +61,7 @@ def upsert_event_metadata(
 
     expr_attr_names = {
         "#name": "name",
+        "#state": "state",
     }
 
     expr_attr_values = {
@@ -74,6 +73,10 @@ def upsert_event_metadata(
         ":end_date": parsed.get("end_date", ""),
         ":status_text": parsed.get("status_text", ""),
         ":division_rounds": division_rounds,
+        ":location_raw": parsed.get("location_raw", ""),
+        ":city": parsed.get("city", ""),
+        ":state": parsed.get("state", ""),
+        ":country": parsed.get("country", ""),
         ":content_sha256": parsed.get("content_sha256", ""),
         ":parse_warnings": parsed.get("parse_warnings", []),
         ":parser_version": parsed.get("parser_version", ""),

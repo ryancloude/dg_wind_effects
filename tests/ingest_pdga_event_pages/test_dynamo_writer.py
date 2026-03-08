@@ -22,9 +22,13 @@ def test_upsert_event_metadata_writes_expected_fields(monkeypatch):
         "end_date": "2025-04-12",
         "status_text": "Official",
         "division_rounds": {"MA1": 2},
+        "location_raw": "Austin, TX, United States",
+        "city": "Austin",
+        "state": "TX",
+        "country": "United States",
         "content_sha256": "content-hash",
         "parse_warnings": [],
-        "parser_version": "event-page-v2",
+        "parser_version": "event-page-v3",
         "idempotency_sha256": "idem-hash",
         "raw_html_sha256": "raw-hash",
         "is_unscheduled_placeholder": False,
@@ -48,4 +52,8 @@ def test_upsert_event_metadata_writes_expected_fields(monkeypatch):
     assert kwargs["Key"] == {"pk": "EVENT#123", "sk": "METADATA"}
     assert kwargs["ExpressionAttributeValues"][":event_id"] == 123
     assert kwargs["ExpressionAttributeValues"][":division_rounds"] == {"MA1": 2}
+    assert kwargs["ExpressionAttributeValues"][":location_raw"] == "Austin, TX, United States"
+    assert kwargs["ExpressionAttributeValues"][":city"] == "Austin"
+    assert kwargs["ExpressionAttributeValues"][":state"] == "TX"
+    assert kwargs["ExpressionAttributeValues"][":country"] == "United States"
     assert kwargs["ExpressionAttributeValues"][":is_unscheduled_placeholder"] is False
