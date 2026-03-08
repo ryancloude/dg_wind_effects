@@ -68,12 +68,29 @@ Resources:
           AttributeType: S
         - AttributeName: sk
           AttributeType: S
+        - AttributeName: status_text
+          AttributeType: S
+        - AttributeName: end_date
+          AttributeType: S
 
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
         - AttributeName: sk
           KeyType: RANGE
+
+      GlobalSecondaryIndexes:
+        # Supports:
+        # - ingest_pdga_event_pages incremental rescrape candidate query
+        # - ingest_pdga_live_results historical backfill candidate query
+        - IndexName: gsi_status_end_date
+          KeySchema:
+            - AttributeName: status_text
+              KeyType: HASH
+            - AttributeName: end_date
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
 
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
