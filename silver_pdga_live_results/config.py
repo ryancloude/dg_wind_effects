@@ -17,6 +17,7 @@ class SilverConfig:
     ddb_table: str
     aws_region: str | None = None
     pipeline_name: str = "LIVE_RESULTS_SILVER"
+    silver_player_round_prefix: str = "silver/pdga/live_results/player_round_current"
 
 
 def load_silver_config() -> SilverConfig:
@@ -25,4 +26,8 @@ def load_silver_config() -> SilverConfig:
         ddb_table=os.environ["PDGA_DDB_TABLE"],
         aws_region=os.getenv("AWS_REGION"),
         pipeline_name=os.getenv("SILVER_LIVE_RESULTS_PIPELINE_NAME", "LIVE_RESULTS_SILVER"),
+        silver_player_round_prefix=os.getenv(
+            "SILVER_PLAYER_ROUND_PREFIX",
+            "silver/pdga/live_results/player_round_current",
+        ),
     )
