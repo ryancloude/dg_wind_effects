@@ -1,105 +1,57 @@
-Here is a merged `README.md` that keeps your current event-pages documentation and adds live-results documentation in the same style.
+1. Replace the current `README.md` with a clean project-level README (the current one still contains generated wrapper text and an outdated “Bronze only” scope statement).
+2. Include current Bronze + Silver behavior, run commands, storage contracts, and links to the docs you just added.
+3. Keep commands copy/paste-ready for local and Docker execution.
 
+### Full `README.md`
 ```md
-# DG Wind Effects - PDGA Bronze Ingest
+# DG Wind Effects
 
-Bronze-layer ingestion for PDGA data sources:
+Production-style data pipeline project for estimating the effect of wind on disc golf scoring.
 
-- Event pages:
-  - Fetch event page HTML
-  - Parse discovery fields such as dates, status, and division round counts
-  - Store raw HTML in S3 and metadata in DynamoDB
-  - Support idempotent re-runs using a stable content hash
-  - Support historical backfill by scanning sequential PDGA event IDs
+Current implemented layers:
+- Bronze:
+  - `ingest_pdga_event_pages`
+  - `ingest_pdga_live_results`
+- Silver:
+  - `silver_pdga_live_results` (player-round and player-hole tables)
 
-- Live results API:
-  - Generate `(event_id, division, round)` tasks from DynamoDB METADATA
-  - Fetch raw live results JSON from PDGA API
-  - Store raw JSON in S3 and state/run metadata in DynamoDB
-  - Support idempotent re-runs via canonical payload hash
-  - Support historical backfill with status/date filters
+Planned next layers:
+- Gold analytics features and wind-impact modeling
 
-## Current Scope
-
-This repo currently implements Bronze ingest layers for:
-
-1. `ingest_pdga_event_pages`
-2. `ingest_pdga_live_results`
-
-Today it focuses on:
-
-- replayable raw source capture to S3
-- lightweight metadata extraction and normalization for downstream processing
-- idempotent writes and re-run safety
-- historical backfill and incremental refresh modes
-
-It does not yet build Silver/Gold datasets. The purpose of this layer is to preserve replayable raw data and extract enough metadata to support downstream normalization and analytics.
-
-## Project Structure
+## Repository Structure
 
 ```text
 dg_wind_effects/
   ingest_pdga_event_pages/
-    config.py
-    dynamo_reader.py
-    dynamo_writer.py
-    event_page_parser.py
-    http_client.py
-    runner.py
-    s3_writer.py
-
   ingest_pdga_live_results/
-    backfill_live_results_ingested_flag.py
-    dynamo_reader.py
-    dynamo_writer.py
-    http_client.py
-    response_handler.py
-    runner.py
-    s3_writer.py
-
+  silver_pdga_live_results/
   tests/
     ingest_pdga_event_pages/
-      fixtures/
-      test_config.py
-      test_dynamo_reader.py
-      test_dynamo_writer.py
-      test_event_page_parser.py
-      test_runner.py
-      test_s3_writer.py
-
     ingest_pdga_live_results/
-      test_backfill_live_results_ingest_flag.py
-      test_dynamo_reader.py
-      test_dynamo_writer.py
-      test_http_client.py
-      test_response_handler.py
-      test_runner.py
-      test_s3_writer.py
-
-  README.md
+    silver_pdga_live_results/
+  docs/
+  docker/
+  infra/
   pyproject.toml
+  requirements.lock
   Dockerfile.event_pages
   Dockerfile.live_results
+  Dockerfile.silver_live_results
 ```
 
 ## Environment Variables
 
-The app reads configuration from environment variables, including values loaded from a local `.env` file.
-
 Required:
-
 - `PDGA_S3_BUCKET`
 - `PDGA_DDB_TABLE`
 
 Optional:
-
 - `AWS_REGION`
-- `PDGA_DDB_STATUS_END_DATE_GSI` (defaults to `gsi_status_end_date`)
+- `PDGA_DDB_STATUS_END_DATE_GSI` (default: `gsi_status_end_date`)
 
 Example `.env`:
-
 ```dotenv
-PDGA_S3_BUCKET=my-pdga-bronze-bucket
+PDGA_S3_BUCKET=my-pdga-bucket
 PDGA_DDB_TABLE=pdga-event-index
 AWS_REGION=us-east-2
 PDGA_DDB_STATUS_END_DATE_GSI=gsi_status_end_date
@@ -107,281 +59,260 @@ PDGA_DDB_STATUS_END_DATE_GSI=gsi_status_end_date
 
 ## Local Setup
 
-Create and activate a virtual environment:
-
 ```powershell
+cd C:\Users\ryanc\dg_wind_effects
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e ".[dev]"
+pip install -r .\requirements.lock
 ```
 
-Install package + dev dependencies:
+## Bronze: Event Page Ingest (`ingest_pdga_event_pages`)
 
+### Run modes
+
+Explicit IDs:
 ```powershell
-pip install -e .[dev]
+python -m ingest_pdga_event_pages.runner --ids 100001,100002
 ```
 
-## Running Event Page Ingest
-
-### 1) Explicit IDs
-
+Inclusive range:
 ```powershell
-python -m ingest_pdga_event_pages.runner --ids 100001,100002,100003
+python -m ingest_pdga_event_pages.runner --range 100000-100050
 ```
 
-### 2) Inclusive Range
-
-```powershell
-python -m ingest_pdga_event_pages.runner --range 100000-100010
-```
-
-### 3) Historical Backfill
-
-Sequentially scans upward from a starting event ID until stop condition is met:
-
+Forward backfill:
 ```powershell
 python -m ingest_pdga_event_pages.runner --backfill-start-id 90000
 ```
 
-### 4) Incremental Mode
-
-Runs a two-phase process:
-
-1. Re-scrape recent events from DynamoDB metadata using status/date filters.
-2. Scan higher IDs forward until stop condition is met.
-
+Incremental mode:
 ```powershell
 python -m ingest_pdga_event_pages.runner --incremental
 ```
 
-### Incremental Mode Details
-
-Default candidate statuses (used when `--incremental-statuses` is not provided):
-
-- `Sanctioned`
-- `Event report received; official ratings pending.`
-- `Event complete; waiting for report.`
-- `In progress.`
-- `Errata pending.`
-
-Date window logic in incremental mode:
-
-- include only events where `end_date < today`
-- include only events where `end_date >= today - incremental_window_days`
-- default `incremental_window_days = 183` (~6 months)
-
-Override statuses:
-
-```powershell
-python -m ingest_pdga_event_pages.runner --incremental --incremental-statuses "Sanctioned,Errata pending."
-```
-
-Override window length:
-
-```powershell
-python -m ingest_pdga_event_pages.runner --incremental --incremental-window-days 183
-```
-
-### Forward Scan Stop Rule
-
-Backfill and incremental forward scan stop after `N` consecutive "no event yet" outcomes.
-
-"No event yet" includes:
-
-- parsed unscheduled placeholder pages
-- HTTP `404` for `https://www.pdga.com/tour/event/<event_id>`
-
-Default threshold:
-
-- `--backfill-stop-after-unscheduled 5`
-
-Optional safety cap:
-
-```powershell
-python -m ingest_pdga_event_pages.runner --incremental --backfill-max-event-id 102500
-```
-
-### Dry Run
-
-`--dry-run` fetches and parses pages but does not write to S3 or DynamoDB:
-
+Dry run:
 ```powershell
 python -m ingest_pdga_event_pages.runner --incremental --dry-run --log-level INFO
 ```
 
-## Running Live Results Ingest
+### Incremental controls
 
-### Explicit Event IDs
+Override statuses:
+```powershell
+python -m ingest_pdga_event_pages.runner --incremental --incremental-statuses "Sanctioned,Errata pending."
+```
 
+Override window:
+```powershell
+python -m ingest_pdga_event_pages.runner --incremental --incremental-window-days 183
+```
+
+Forward-scan stop controls:
+```powershell
+python -m ingest_pdga_event_pages.runner --incremental --backfill-stop-after-unscheduled 5 --backfill-max-event-id 102500
+```
+
+## Bronze: Live Results Ingest (`ingest_pdga_live_results`)
+
+### Run modes
+
+Explicit IDs:
 ```powershell
 python -m ingest_pdga_live_results.runner --event-ids 92608,92612
 ```
 
-### Event IDs from S3 File (optional)
-
+Event IDs from S3 file:
 ```powershell
-python -m ingest_pdga_live_results.runner --event-ids-s3-uri s3://my-bucket/path/to/event_ids.csv
+python -m ingest_pdga_live_results.runner --event-ids-s3-uri s3://my-bucket/path/event_ids.csv
 ```
 
-### Historical Backfill
-
+Historical backfill:
 ```powershell
 python -m ingest_pdga_live_results.runner --historical-backfill
 ```
 
-Historical mode defaults:
-
-- excludes statuses:
-  - `Sanctioned`
-  - `Event report received; official ratings pending.`
-  - `Event complete; waiting for report.`
-  - `In progress.`
-  - `Errata pending.`
-- requires non-empty `division_rounds`
-- excludes events already marked `live_results_ingested=true`
-
-### Override Historical Excluded Statuses
-
-```powershell
-python -m ingest_pdga_live_results.runner --historical-backfill --historical-excluded-statuses "Sanctioned,In progress."
-```
-
-### Dry Run
-
+Dry run:
 ```powershell
 python -m ingest_pdga_live_results.runner --historical-backfill --dry-run
 ```
 
-### Throughput / Progress Controls
-
+Throughput/progress controls:
 ```powershell
 python -m ingest_pdga_live_results.runner --historical-backfill --sleep-base 0.7 --sleep-jitter 0.5 --progress-every 50
 ```
 
-## Storage Behavior
-
-### S3 Bronze Raw
-
-Event page ingest writes:
-
-```text
-bronze/pdga/event_page/event_id=<event_id>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC_ISO>.html.gz
-bronze/pdga/event_page/event_id=<event_id>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC_ISO>.meta.json
+Override excluded statuses:
+```powershell
+python -m ingest_pdga_live_results.runner --historical-backfill --historical-excluded-statuses "Sanctioned,In progress."
 ```
 
-Live results ingest writes:
-
-```text
-bronze/pdga/live_results/event_id=<event_id>/division=<division>/round=<round>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC_ISO>.json
-bronze/pdga/live_results/event_id=<event_id>/division=<division>/round=<round>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC_ISO>.meta.json
-```
-
-### DynamoDB
-
-Event metadata item:
-
-- `pk = EVENT#<event_id>`
-- `sk = METADATA`
-
-Live results state item (per division+round):
-
-- `pk = EVENT#<event_id>`
-- `sk = LIVE_RESULTS#DIV#<division>#ROUND#<round>`
-
-Live results run summary item:
-
-- `pk = RUN#<run_id>`
-- `sk = LIVE_RESULTS#SUMMARY`
-
-Live results completion markers on METADATA:
-
-- `live_results_ingested = true`
-- `live_results_ingested_at`
-- `live_results_ingested_run_id`
-
-## Backfill Utility
-
-One-time utility to mark existing events that already have live results state rows:
-
+Backfill existing `live_results_ingested` markers:
 ```powershell
 python -m ingest_pdga_live_results.backfill_live_results_ingested_flag
 ```
 
+## Silver: Live Results Normalization (`silver_pdga_live_results`)
+
+Builds:
+- `player_rounds` (grain: player-round-event)
+- `player_holes` (grain: player-hole-round-event)
+
+Key properties:
+- Incremental via event fingerprint checkpoints
+- Idempotent event-level overwrite
+- Deterministic player key fallback (`PDGA -> ResultID -> NAMEHASH`)
+- DQ gates with quarantine on failure
+- Supports round-only events (no hole detail available)
+
+### Run
+
+Dry run:
+```powershell
+python -m silver_pdga_live_results.runner --dry-run --log-level INFO
+```
+
+Specific events:
+```powershell
+python -m silver_pdga_live_results.runner --event-ids 90008,90009 --log-level INFO
+```
+
+Force reprocess:
+```powershell
+python -m silver_pdga_live_results.runner --event-ids 90008 --force-events --log-level INFO
+```
+
+Console script equivalent:
+```powershell
+plan-silver-live-results --dry-run --log-level INFO
+```
+
+## Docker Runs
+
+Build images:
+```powershell
+docker build -f Dockerfile.event_pages -t dg_event_pages:dev .
+docker build -f Dockerfile.live_results -t dg_live_results:dev .
+docker build -f Dockerfile.silver_live_results -t dg_silver_live_results:dev .
+```
+
+Run:
+```powershell
+docker run --rm --env-file .env dg_event_pages:dev --incremental
+docker run --rm --env-file .env dg_live_results:dev --historical-backfill
+docker run --rm --env-file .env dg_silver_live_results:dev --dry-run --log-level INFO
+```
+
+## Storage Contracts
+
+### S3 Bronze
+
+Event pages:
+```text
+bronze/pdga/event_page/event_id=<event_id>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.html.gz
+bronze/pdga/event_page/event_id=<event_id>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.meta.json
+```
+
+Live results:
+```text
+bronze/pdga/live_results/event_id=<event_id>/division=<division>/round=<round>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.json
+bronze/pdga/live_results/event_id=<event_id>/division=<division>/round=<round>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.meta.json
+```
+
+### S3 Silver
+
+Final deterministic event keys:
+```text
+silver/pdga/live_results/player_rounds/event_year=<YYYY>/tourn_id=<event_id>/player_rounds.parquet
+silver/pdga/live_results/player_holes/event_year=<YYYY>/tourn_id=<event_id>/player_holes.parquet
+```
+
+Quarantine:
+```text
+silver/pdga/live_results/quarantine/event_id=<event_id>/run_id=<run_id>/dq_errors.json
+```
+
+### DynamoDB (single table model)
+
+See full reference in:
+- `docs/dynamodb_data_model.md`
+
+Core item families:
+- Event metadata:
+  - `pk=EVENT#<event_id>`, `sk=METADATA`
+- Live results state:
+  - `pk=EVENT#<event_id>`, `sk=LIVE_RESULTS#DIV#<division>#ROUND#<round>`
+- Bronze run summary:
+  - `pk=RUN#<run_id>`, `sk=LIVE_RESULTS#SUMMARY`
+- Silver event checkpoint:
+  - `pk=PIPELINE#SILVER_LIVE_RESULTS`, `sk=EVENT#<event_id>`
+- Silver run summary:
+  - `pk=RUN#<run_id>`, `sk=SILVER_LIVE_RESULTS#SUMMARY`
+
 ## Testing
 
-Run all tests:
-
+All tests:
 ```powershell
-python -m pytest
+python -m pytest -v
 ```
 
-Run event-pages suite:
-
+By layer:
 ```powershell
 python -m pytest tests/ingest_pdga_event_pages -v
-```
-
-Run live-results suite:
-
-```powershell
 python -m pytest tests/ingest_pdga_live_results -v
+python -m pytest tests/silver_pdga_live_results -v
 ```
 
-Run targeted suites:
+Focused regression:
+```powershell
+python -m pytest tests/silver_pdga_live_results/test_round_only_events.py -v
+```
+
+## Documentation Index
+
+- Silver schema:
+  - `docs/silver_live_results_schema.md`
+- Silver code walkthrough:
+  - `docs/silver_live_results_code_walkthrough.md`
+- Event pages walkthrough:
+  - `docs/ingest_pdga_event_pages_code_walkthrough.md`
+- Live results walkthrough:
+  - `docs/ingest_pdga_live_results_code_walkthrough.md`
+- DynamoDB data model:
+  - `docs/dynamodb_data_model.md`
+- Backfill completion checklist:
+  - `docs/silver_backfill_completion_checklist.md`
+
+## Notes
+
+- Rebuild Docker images after code changes to avoid stale installed package behavior.
+- Date comparisons in DynamoDB workflows assume `YYYY-MM-DD` ISO strings.
+- Silver backfill progress can be monitored via logs and Silver checkpoint items in DynamoDB.
+```
+
+### What changed and why
+
+- Removed generated wrapper text and code-fenced README artifact.
+- Updated scope to include Silver (current repo reality).
+- Added Silver commands, storage paths, and DynamoDB checkpoint/run-summary item types.
+- Linked your new docs so onboarding and operations are centralized.
+
+### How to apply and validate
 
 ```powershell
-python -m pytest tests/ingest_pdga_event_pages/test_event_page_parser.py -v
-python -m pytest tests/ingest_pdga_event_pages/test_runner.py -v
-python -m pytest tests/ingest_pdga_event_pages/test_dynamo_reader.py -v
-python -m pytest tests/ingest_pdga_event_pages/test_dynamo_writer.py -v
-python -m pytest tests/ingest_pdga_event_pages/test_s3_writer.py -v
-python -m pytest tests/ingest_pdga_event_pages/test_config.py -v
-
-python -m pytest tests/ingest_pdga_live_results/test_dynamo_reader.py -v
-python -m pytest tests/ingest_pdga_live_results/test_dynamo_writer.py -v
-python -m pytest tests/ingest_pdga_live_results/test_http_client.py -v
-python -m pytest tests/ingest_pdga_live_results/test_response_handler.py -v
-python -m pytest tests/ingest_pdga_live_results/test_runner.py -v
-python -m pytest tests/ingest_pdga_live_results/test_s3_writer.py -v
-python -m pytest tests/ingest_pdga_live_results/test_backfill_live_results_ingest_flag.py -v
+# replace README.md content with the file above
+git add README.md
+git commit -m "docs: refresh README for bronze+silver pipelines and runbook links"
 ```
 
-## Fixtures and Regression Testing
-
-`tests/ingest_pdga_event_pages/fixtures/` stores representative PDGA HTML inputs for parser coverage.
-
-Recommended fixture types:
-
-- normal scheduled event
-- multi-day event
-- unscheduled placeholder event
-- missing status
-- no divisions/results table
-- any real backfill edge case that previously failed parsing
-
-Regression workflow:
-
-1. Capture failing real-world page shape.
-2. Add fixture + failing test.
-3. Fix parser/runner behavior.
-4. Keep the test to prevent recurrence.
-
-## Operational Notes
-
-- If running in Docker, rebuild image after code changes to avoid running stale installed code.
-- Date comparisons assume ISO format (`YYYY-MM-DD`) in DynamoDB.
-- If historical planning appears slow, verify `live_results_ingested` flags are populated and historical filters are active.
-
-## Recommended Default Commands
-
-Event pages incremental:
-
+Validation:
 ```powershell
-python -m ingest_pdga_event_pages.runner --incremental --backfill-stop-after-unscheduled 5 --incremental-window-days 183
-```
+# quick markdown sanity/readability check (manual)
+Get-Content README.md -TotalCount 60
 
-Live results historical:
-
-```powershell
-python -m ingest_pdga_live_results.runner --historical-backfill --sleep-base 0.7 --sleep-jitter 0.5 --progress-every 50
-```
+# ensure commands in README map to existing modules
+python -m pytest tests/ingest_pdga_event_pages -q
+python -m pytest tests/ingest_pdga_live_results -q
+python -m pytest tests/silver_pdga_live_results -q
 ```
