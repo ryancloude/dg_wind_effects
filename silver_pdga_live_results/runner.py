@@ -12,6 +12,7 @@ from silver_pdga_live_results.dynamo_io import (
     get_silver_event_checkpoint,
     load_candidate_event_metadata,
     load_live_results_state_items,
+    load_silver_event_checkpoints,
     put_silver_event_checkpoint,
     put_silver_run_summary,
     utc_now_iso,
@@ -60,11 +61,22 @@ def make_run_id() -> str:
 
 def parse_args():
     p = argparse.ArgumentParser(description="Build Silver player_rounds/player_holes from PDGA Bronze live results.")
-    p.add_argument("--event-ids", help="Optional comma-separated event IDs. If omitted, process all final+ingested events.")
+    p.add_argument("--event-ids", help="Optional comma-separated event IDs. If omitted, process candidates by run mode.")
     p.add_argument("--bucket", help="Override S3 bucket")
     p.add_argument("--ddb-table", help="Override DynamoDB table")
     p.add_argument("--dry-run", action="store_true", help="Plan/validate only; no writes")
     p.add_argument("--force-events", action="store_true", help="Process events even when fingerprint unchanged")
+    p.add_argument(
+        "--run-mode",
+        choices=("pending_only", "full_check"),
+        default="pending_only",
+        help="pending_only: process only events without success checkpoints; full_check: evaluate all candidates",
+    )
+    p.add_argument(
+        "--include-dq-failed-in-pending",
+        action="store_true",
+        help="When run-mode=pending_only, include events with checkpoint status=dq_failed.",
+    )
     p.add_argument("--progress-every", type=int, default=25, help="Emit progress every N events")
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
@@ -123,8 +135,40 @@ def _expected_division_rounds(event_metadata: dict[str, Any]) -> set[tuple[str, 
     return expected
 
 
+def _is_pending_event(
+    event_metadata: dict[str, Any],
+    checkpoints: dict[int, dict[str, Any]],
+    *,
+    include_dq_failed: bool,
+) -> bool:
+    event_id = int(event_metadata["event_id"])
+    checkpoint = checkpoints.get(event_id)
+    if not checkpoint:
+        return True
+
+    status = str(checkpoint.get("status", "")).strip().lower()
+
+    if status in ("failed", ""):
+        return True
+
+    if status == "dq_failed":
+        return bool(include_dq_failed)
+
+    if status == "success":
+        # If a legacy/bad checkpoint has no fingerprint, treat as pending.
+        fp = str(checkpoint.get("event_source_fingerprint", "")).strip()
+        return fp == ""
+
+    # Unknown status: treat as pending so we don't silently skip.
+    return True
+
+
 def main() -> int:
     args = parse_args()
+
+    # Backward-compatible defaults for tests/mocked args that bypass argparse.
+    run_mode = getattr(args, "run_mode", "pending_only")
+    include_dq_failed_in_pending = bool(getattr(args, "include_dq_failed_in_pending", False))
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -140,18 +184,37 @@ def main() -> int:
     stats = RunStats()
     progress_every = max(int(args.progress_every), 1)
 
-    events = load_candidate_event_metadata(
+    candidate_events = load_candidate_event_metadata(
         table_name=ddb_table,
         aws_region=cfg.aws_region,
         status_end_date_gsi_name=cfg.ddb_status_end_date_gsi,
         event_ids=event_ids,
     )
 
+    selected_events = candidate_events
+    if event_ids is None and run_mode == "pending_only":
+        checkpoints = load_silver_event_checkpoints(
+            table_name=ddb_table,
+            aws_region=cfg.aws_region,
+        )
+        selected_events = [
+            event
+            for event in candidate_events
+            if _is_pending_event(
+                event,
+                checkpoints,
+                include_dq_failed=include_dq_failed_in_pending,
+            )
+        ]
+
     logger.info(
         "silver_run_plan",
         extra={
             "run_id": run_id,
-            "event_count": len(events),
+            "run_mode": run_mode,
+            "include_dq_failed_in_pending": include_dq_failed_in_pending,
+            "candidate_event_count": len(candidate_events),
+            "selected_event_count": len(selected_events),
             "dry_run": bool(args.dry_run),
             "force_events": bool(args.force_events),
         },
@@ -160,14 +223,17 @@ def main() -> int:
         {
             "silver_run_plan": {
                 "run_id": run_id,
-                "event_count": len(events),
+                "run_mode": run_mode,
+                "include_dq_failed_in_pending": include_dq_failed_in_pending,
+                "candidate_event_count": len(candidate_events),
+                "selected_event_count": len(selected_events),
                 "dry_run": bool(args.dry_run),
                 "force_events": bool(args.force_events),
             }
         }
     )
 
-    for idx, event_metadata in enumerate(events, start=1):
+    for idx, event_metadata in enumerate(selected_events, start=1):
         event_id = int(event_metadata["event_id"])
         stats.attempted_events += 1
 
@@ -199,7 +265,13 @@ def main() -> int:
                 aws_region=cfg.aws_region,
             )
 
-            if not args.force_events and checkpoint and checkpoint.get("event_source_fingerprint") == event_fingerprint:
+            # Skip unchanged only when prior run was successful for this exact fingerprint.
+            if (
+                not args.force_events
+                and checkpoint
+                and str(checkpoint.get("status", "")).strip().lower() == "success"
+                and checkpoint.get("event_source_fingerprint") == event_fingerprint
+            ):
                 stats.skipped_unchanged_events += 1
                 logger.info("silver_event_skipped_unchanged", extra={"event_id": event_id, "run_id": run_id})
                 continue
@@ -329,11 +401,11 @@ def main() -> int:
             except Exception:
                 logger.exception("silver_checkpoint_write_failed", extra={"event_id": event_id, "run_id": run_id})
 
-        if idx % progress_every == 0 or idx == len(events):
+        if idx % progress_every == 0 or idx == len(selected_events):
             progress = {
                 "run_id": run_id,
                 "processed_events": idx,
-                "total_events": len(events),
+                "total_events": len(selected_events),
                 **stats.to_dict(),
             }
             logger.info("silver_progress", extra=progress)

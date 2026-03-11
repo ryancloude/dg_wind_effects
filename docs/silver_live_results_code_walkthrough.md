@@ -19,6 +19,7 @@ This document explains how `silver_pdga_live_results` works end-to-end.
 
 - `silver_pdga_live_results/dynamo_io.py`
   - Loads candidate events from DynamoDB (`METADATA`).
+  - Loads Silver checkpoints (`PIPELINE#SILVER_LIVE_RESULTS`).
   - Loads live-results state rows (`LIVE_RESULTS#DIV#...#ROUND#...`).
   - Reads/writes Silver event checkpoints.
   - Writes Silver run summaries.
@@ -55,8 +56,10 @@ This document explains how `silver_pdga_live_results` works end-to-end.
 
 - `silver_pdga_live_results/runner.py`
   - CLI entrypoint and orchestrator.
+  - Handles run mode selection (`pending_only` vs `full_check`).
   - Event loop:
     - load candidates
+    - filter pending (run mode dependent)
     - resolve Bronze sources
     - fingerprint compare with checkpoint
     - normalize
@@ -66,26 +69,49 @@ This document explains how `silver_pdga_live_results` works end-to-end.
     - checkpoint + run summary
   - Emits structured progress logs and summary.
 
-## Processing Lifecycle (Per Event)
+## Run Modes
+
+### pending_only (default)
+Used when `--event-ids` is not provided.
+
+Selection logic:
+- include event if checkpoint missing
+- include event if checkpoint status is `failed` or `dq_failed` (or blank)
+- include event if checkpoint status is `success` but fingerprint is blank
+- exclude event if checkpoint status is `success` with valid fingerprint
+
+This is the fast resume mode for stable/final Bronze data.
+
+### full_check
+Used when you want all candidates evaluated again.
+- Still uses per-event fingerprint skip in-processing.
+- More expensive than `pending_only`.
+
+### event-ids override
+If `--event-ids` is provided, explicit IDs are used directly regardless of run mode filtering.
+
+## Processing Lifecycle (Per Selected Event)
 
 1. Load live-results state rows from DynamoDB.
 2. Resolve Bronze source payloads (`BronzeRoundSource` list).
 3. Validate expected `(division, round)` coverage from `division_rounds`.
 4. Compute `event_source_fingerprint`.
-5. Compare against checkpoint fingerprint.
-6. Skip unchanged unless `--force-events`.
-7. Normalize to `player_rounds` + `player_holes`.
-8. Deduplicate by logical key with deterministic tie-break columns.
-9. Validate DQ checks.
-10. On DQ pass:
-    - write Parquet
-    - write success checkpoint
-11. On DQ fail:
+5. Skip as unchanged only when:
+   - checkpoint status is `success`
+   - fingerprint matches
+   - `--force-events` is not set
+6. Normalize to `player_rounds` + `player_holes`.
+7. Deduplicate by logical key with deterministic tie-break columns.
+8. Validate DQ checks.
+9. On DQ pass:
+   - write Parquet
+   - write success checkpoint
+10. On DQ fail:
     - write quarantine report
     - write `dq_failed` checkpoint
-12. On exception:
+11. On exception:
     - write `failed` checkpoint
-13. Continue to next event.
+12. Continue to next event.
 
 ## Run-Level Metrics (`RunStats`)
 - `attempted_events`
@@ -100,9 +126,10 @@ This document explains how `silver_pdga_live_results` works end-to-end.
 These are printed and stored in DynamoDB run summary.
 
 ## Why This Design
-- Event-level fingerprint + checkpoint yields cheap incremental reruns.
-- Deterministic output keys guarantee idempotency.
-- Denormalized Silver tables simplify analytics and Gold modeling.
+- `pending_only` keeps reruns fast for finalized Bronze datasets.
+- Checkpoint-driven selection avoids wasteful full event rechecks.
+- Fingerprint checks preserve idempotency and replayability.
+- Deterministic output keys guarantee overwrite-safe writes.
 - DQ gate prevents silent corruption.
 - Round-only event support avoids false failures when hole detail is unavailable.
 
@@ -112,3 +139,4 @@ These are printed and stored in DynamoDB run summary.
 - Missing `PDGANum`
 - Sparse payloads where hole detail is absent
 - GSI projection gaps for `live_results_ingested` filter
+- Retry path where failed/dq_failed events should not be skipped

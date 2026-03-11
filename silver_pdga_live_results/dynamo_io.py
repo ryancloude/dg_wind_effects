@@ -9,6 +9,8 @@ from botocore.exceptions import ClientError
 
 from silver_pdga_live_results.models import FINAL_EVENT_STATUSES
 
+SILVER_CHECKPOINT_PK = "PIPELINE#SILVER_LIVE_RESULTS"
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -180,6 +182,51 @@ def load_candidate_event_metadata(
         return _scan_final_events_fallback(table=table)
 
 
+def load_silver_event_checkpoints(
+    *,
+    table_name: str,
+    aws_region: Optional[str],
+) -> dict[int, dict[str, Any]]:
+    """
+    Load all Silver event checkpoints as {event_id: checkpoint_item}.
+    """
+    table = _ddb_resource(aws_region).Table(table_name)
+
+    checkpoints: dict[int, dict[str, Any]] = {}
+    last_key = None
+
+    while True:
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": Key("pk").eq(SILVER_CHECKPOINT_PK),
+            "ConsistentRead": False,
+        }
+        if last_key:
+            kwargs["ExclusiveStartKey"] = last_key
+
+        resp = table.query(**kwargs)
+        for item in resp.get("Items", []):
+            event_id_raw = item.get("event_id")
+            if event_id_raw is None:
+                sk = str(item.get("sk", ""))
+                if sk.startswith("EVENT#"):
+                    try:
+                        event_id_raw = int(sk.replace("EVENT#", "", 1))
+                    except ValueError:
+                        event_id_raw = None
+
+            if event_id_raw is None:
+                continue
+
+            event_id = int(event_id_raw)
+            checkpoints[event_id] = item
+
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+
+    return checkpoints
+
+
 def load_live_results_state_items(
     *,
     table_name: str,
@@ -215,7 +262,7 @@ def get_silver_event_checkpoint(
 ) -> dict[str, Any] | None:
     table = _ddb_resource(aws_region).Table(table_name)
     resp = table.get_item(
-        Key={"pk": "PIPELINE#SILVER_LIVE_RESULTS", "sk": f"EVENT#{int(event_id)}"},
+        Key={"pk": SILVER_CHECKPOINT_PK, "sk": f"EVENT#{int(event_id)}"},
         ConsistentRead=False,
     )
     return resp.get("Item")
@@ -234,7 +281,7 @@ def put_silver_event_checkpoint(
     table = _ddb_resource(aws_region).Table(table_name)
 
     item = {
-        "pk": "PIPELINE#SILVER_LIVE_RESULTS",
+        "pk": SILVER_CHECKPOINT_PK,
         "sk": f"EVENT#{int(event_id)}",
         "event_id": int(event_id),
         "pipeline": "silver_live_results",

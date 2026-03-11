@@ -28,6 +28,8 @@ def test_runner_allows_round_only_event_in_dry_run(monkeypatch):
         ddb_table=None,
         dry_run=True,
         force_events=False,
+        run_mode="pending_only",
+        include_dq_failed_in_pending=False,
         progress_every=1,
         log_level="INFO",
     )

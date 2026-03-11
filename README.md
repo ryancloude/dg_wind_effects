@@ -161,6 +161,7 @@ Builds:
 
 Key properties:
 - Incremental via event fingerprint checkpoints
+- Default fast resume mode (`--run-mode pending_only`)
 - Idempotent event-level overwrite
 - Deterministic player key fallback (`PDGA -> ResultID -> NAMEHASH`)
 - DQ gates with quarantine on failure
@@ -304,15 +305,4 @@ python -m pytest tests/silver_pdga_live_results/test_round_only_events.py -v
 # replace README.md content with the file above
 git add README.md
 git commit -m "docs: refresh README for bronze+silver pipelines and runbook links"
-```
-
-Validation:
-```powershell
-# quick markdown sanity/readability check (manual)
-Get-Content README.md -TotalCount 60
-
-# ensure commands in README map to existing modules
-python -m pytest tests/ingest_pdga_event_pages -q
-python -m pytest tests/ingest_pdga_live_results -q
-python -m pytest tests/silver_pdga_live_results -q
 ```
