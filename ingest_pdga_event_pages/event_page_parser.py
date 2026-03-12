@@ -17,9 +17,21 @@ UNSCHEDULED_PLACEHOLDER_PATTERNS = (
 )
 
 DIVISION_SEPARATOR_RE = re.compile(r"\s*(?:\u00b7|\u00c2\u00b7)\s*")
+DIVISION_CODE_RE = re.compile(r"^[A-Z]{1,4}\d{0,2}$")
 LOCATION_PREFIX_RE = re.compile(r"^location:\s*(.+)$", re.IGNORECASE)
 US_STATE_CODE_RE = re.compile(r"^[A-Z]{2}$")
 
+def _extract_division_code(title: str) -> str:
+    # Preferred path: split on canonical separator glyphs.
+    if DIVISION_SEPARATOR_RE.search(title):
+        return DIVISION_SEPARATOR_RE.split(title, maxsplit=1)[0].strip()
+
+    # Fallback path: use first token if it looks like a division code.
+    # Handles mojibake/encoding variants in heading separators.
+    first = title.split(" ", 1)[0].strip()
+    if DIVISION_CODE_RE.fullmatch(first):
+        return first
+    return ""
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -51,12 +63,24 @@ def idempotency_sha256(parsed: Dict[str, Any]) -> str:
     return sha256_text(serialized)
 
 
+def _normalize_date_range_text(raw: str) -> str:
+    normalized = normalize_ws(raw)
+    # Normalize common separators/arrows/dashes into " to "
+    normalized = normalized.replace("–", " to ").replace("—", " to ").replace("→", " to ")
+    normalized = normalized.replace(" - ", " to ")
+    normalized = re.sub(r"\s+to\s+", " to ", normalized, flags=re.IGNORECASE)
+    return normalized
+
+
+def _parse_dd_mmm_yyyy(value: str) -> datetime:
+    return datetime.strptime(value, "%d-%b-%Y")
+
+
 def parse_date_range(raw: str) -> Tuple[str, str]:
-    normalized = normalize_ws(raw.replace("Ã¢â‚¬â€œ", "to").replace("Ã¢â‚¬â€", "to"))
-    normalized = re.sub(r"\s*-\s*", " to ", normalized, count=1) if " - " in normalized else normalized
+    normalized = _normalize_date_range_text(raw)
 
     if " to " not in normalized:
-        dt = datetime.strptime(normalized, "%d-%b-%Y").strftime("%Y-%m-%d")
+        dt = _parse_dd_mmm_yyyy(normalized).strftime("%Y-%m-%d")
         return dt, dt
 
     left, right = [part.strip() for part in normalized.split(" to ", 1)]
@@ -64,13 +88,24 @@ def parse_date_range(raw: str) -> Tuple[str, str]:
     if re.search(r"-\d{4}$", right) is None:
         raise ValueError(f"End date missing year: {raw}")
 
-    end_year = right.split("-")[-1]
-    if re.search(r"-\d{4}$", left) is None:
+    end_year = int(right.split("-")[-1])
+    left_had_year = re.search(r"-\d{4}$", left) is not None
+
+    if not left_had_year:
         left = f"{left}-{end_year}"
 
-    start = datetime.strptime(left, "%d-%b-%Y").strftime("%Y-%m-%d")
-    end = datetime.strptime(right, "%d-%b-%Y").strftime("%Y-%m-%d")
-    return start, end
+    start_dt = _parse_dd_mmm_yyyy(left)
+    end_dt = _parse_dd_mmm_yyyy(right)
+
+    # Cross-year correction for forms like "08-Nov to 17-Jan-2026":
+    # left inherited 2026, but should be previous year when start > end.
+    if not left_had_year and start_dt > end_dt:
+        start_dt = start_dt.replace(year=start_dt.year - 1)
+
+    if start_dt > end_dt:
+        raise ValueError(f"Parsed start_date > end_date for raw date range: {raw}")
+
+    return start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
 
 
 def extract_date_str(soup: bs) -> str:
@@ -113,10 +148,9 @@ def find_division_rounds(soup: bs) -> Dict[str, int]:
 
     for heading in soup.find_all(["h2", "h3", "h4"]):
         title = normalize_ws(heading.get_text(" ", strip=True))
-        if not DIVISION_SEPARATOR_RE.search(title):
+        div_code = _extract_division_code(title)
+        if not div_code:
             continue
-
-        div_code = DIVISION_SEPARATOR_RE.split(title, maxsplit=1)[0].strip()
 
         table = heading.find_next("table")
         if not table:
@@ -238,7 +272,7 @@ def parse_event_page(event_id: int, html: str, source_url: Optional[str] = None)
         "state": state,
         "country": country,
         "content_sha256": sha256_text(html),
-        "parser_version": "event-page-v3",
+        "parser_version": "event-page-v4",
         "parse_warnings": warnings,
         "raw_html_sha256": sha256_text(html),
     }

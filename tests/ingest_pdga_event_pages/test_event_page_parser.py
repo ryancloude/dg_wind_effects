@@ -28,6 +28,18 @@ def test_parse_date_range_multi_day_with_missing_start_year():
     assert end == "2025-04-14"
 
 
+def test_parse_date_range_cross_year_missing_start_year():
+    start, end = parse_date_range("08-Nov to 17-Jan-2026")
+    assert start == "2025-11-08"
+    assert end == "2026-01-17"
+
+
+def test_parse_date_range_cross_year_dec_jan():
+    start, end = parse_date_range("30-Dec to 02-Jan-2026")
+    assert start == "2025-12-30"
+    assert end == "2026-01-02"
+
+
 def test_parse_date_range_raises_for_invalid_format():
     with pytest.raises(ValueError):
         parse_date_range("April 12, 2025")
@@ -85,7 +97,7 @@ def test_parse_normal_event_page():
         <table>
           <tr><td class="status">Official</td></tr>
         </table>
-        <h2>MA1 Â· Advanced (50)</h2>
+        <h2>MA1 A,Aú Advanced (50)</h2>
         <table>
           <tr>
             <th>Place</th>
@@ -125,7 +137,7 @@ def test_parse_location_fallback_from_text_line():
         <table>
           <tr><td class="status">Official</td></tr>
         </table>
-        <h2>MPO Â· Mixed Pro Open (20)</h2>
+        <h2>MPO A,Aú Mixed Pro Open (20)</h2>
         <table>
           <tr>
             <th>Place</th>
