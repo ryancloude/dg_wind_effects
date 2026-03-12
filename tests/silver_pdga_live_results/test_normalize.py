@@ -87,9 +87,12 @@ def test_normalize_uses_result_id_fallback_and_enriches_location():
     assert round_row["event_city"] == "Blackwell"
     assert round_row["event_state"] == "OK"
     assert round_row["event_country"] == "US"
+    assert round_row["round_date_interp"] == "2025-05-17"
+    assert round_row["round_date_interp_method"] == "event_start_single_day"
 
     assert {row["hole_number"] for row in hole_rows} == {1, 2}
     assert {row["hole_score"] for row in hole_rows} == {2, 3}
+    assert {row["round_date_interp"] for row in hole_rows} == {"2025-05-17"}
 
 
 def test_normalize_falls_back_to_scores_string_when_hole_scores_missing():
@@ -154,3 +157,136 @@ def test_normalize_falls_back_to_scores_string_when_hole_scores_missing():
 
     assert len(hole_rows) == 2
     assert [row["hole_score"] for row in hole_rows] == [3, 4]
+
+
+def test_round_date_interp_multi_day_event_linear_mapping():
+    event_metadata = {
+        "event_id": 91000,
+        "name": "Multi-Day Championship",
+        "status_text": "Event complete; official ratings processed.",
+        "start_date": "2025-06-20",
+        "end_date": "2025-06-22",
+        "division_rounds": {"MPO": 4},
+    }
+
+    payload = {
+        "data": {
+            "scores": [
+                {"Division": "MPO", "Round": 1, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
+                {"Division": "MPO", "Round": 2, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
+                {"Division": "MPO", "Round": 3, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
+                {"Division": "MPO", "Round": 4, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
+            ],
+            "layouts": [
+                {
+                    "LayoutID": 1,
+                    "Name": "Champ",
+                    "Holes": 1,
+                    "Par": 3,
+                    "Detail": [{"Ordinal": 1, "Hole": "H1", "Par": 3, "Length": 300}],
+                }
+            ],
+            "holes": [],
+        }
+    }
+
+    source = BronzeRoundSource(
+        event_id=91000,
+        division="MPO",
+        round_number=1,
+        source_json_key="k.json",
+        source_meta_key="k.meta.json",
+        source_content_sha256="sha",
+        source_fetched_at_utc="2025-06-22T20:00:00Z",
+        payload=payload,
+    )
+
+    round_rows, hole_rows = normalize_event_records(
+        event_metadata=event_metadata,
+        round_sources=[source],
+        event_source_fingerprint="fp3",
+        run_id="run-3",
+        silver_processed_at_utc="2026-03-11T10:00:00Z",
+    )
+
+    assert len(round_rows) == 4
+    assert len(hole_rows) == 4
+
+    by_round = {row["round_number"]: row["round_date_interp"] for row in round_rows}
+    assert by_round[1] == "2025-06-20"
+    assert by_round[2] == "2025-06-20"
+    assert by_round[3] == "2025-06-21"
+    assert by_round[4] == "2025-06-22"
+
+    assert {row["round_date_interp_method"] for row in round_rows} == {"event_span_linear"}
+    assert {row["round_date_interp_method"] for row in hole_rows} == {"event_span_linear"}
+
+
+def test_round_date_interp_missing_start_date_fallback():
+    event_metadata = {
+        "event_id": 91001,
+        "name": "Bad Dates Open",
+        "status_text": "Event complete; official ratings processed.",
+        "start_date": "",
+        "end_date": "2025-06-22",
+    }
+
+    payload = {
+        "data": {
+            "scores": [
+                {
+                    "Division": "MPO",
+                    "Round": 1,
+                    "LayoutID": 2,
+                    "Name": "B",
+                    "PDGANum": 1002,
+                    "HoleScores": ["3"],
+                    "Holes": 1,
+                    "Played": 1,
+                    "RoundScore": 3,
+                    "RoundtoPar": 0,
+                    "RoundStatus": "I",
+                }
+            ],
+            "layouts": [
+                {
+                    "LayoutID": 2,
+                    "Name": "Fallback",
+                    "Holes": 1,
+                    "Par": 3,
+                    "Detail": [{"Ordinal": 1, "Hole": "H1", "Par": 3, "Length": 250}],
+                }
+            ],
+            "holes": [],
+        }
+    }
+
+    source = BronzeRoundSource(
+        event_id=91001,
+        division="MPO",
+        round_number=1,
+        source_json_key="k2.json",
+        source_meta_key="k2.meta.json",
+        source_content_sha256="sha2",
+        source_fetched_at_utc="2025-06-22T20:00:00Z",
+        payload=payload,
+    )
+
+    round_rows, hole_rows = normalize_event_records(
+        event_metadata=event_metadata,
+        round_sources=[source],
+        event_source_fingerprint="fp4",
+        run_id="run-4",
+        silver_processed_at_utc="2026-03-11T10:00:00Z",
+    )
+
+    assert len(round_rows) == 1
+    assert len(hole_rows) == 1
+
+    assert round_rows[0]["round_date_interp"] == ""
+    assert round_rows[0]["round_date_interp_method"] == "missing_start_date"
+    assert round_rows[0]["round_date_interp_confidence"] == 0.30
+
+    assert hole_rows[0]["round_date_interp"] == ""
+    assert hole_rows[0]["round_date_interp_method"] == "missing_start_date"
+    assert hole_rows[0]["round_date_interp_confidence"] == 0.30

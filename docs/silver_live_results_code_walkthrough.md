@@ -1,119 +1,104 @@
 # Silver Live Results Code Walkthrough
 
 ## Purpose
-This document explains how `silver_pdga_live_results` works end-to-end.
+Explains how `silver_pdga_live_results` transforms Bronze live-results JSON into Silver Parquet outputs.
 
-## Module Map
+## Module map
 
-- `silver_pdga_live_results/config.py`
-  - Loads env configuration (`PDGA_S3_BUCKET`, `PDGA_DDB_TABLE`, `AWS_REGION`, `PDGA_DDB_STATUS_END_DATE_GSI`).
+`config.py`
+- Loads env config for bucket/table/region/GSI.
 
-- `silver_pdga_live_results/models.py`
-  - Shared constants:
-    - final statuses
-    - logical PK columns
-    - tie-break columns
-    - required lineage columns
-  - Dataclass:
-    - `BronzeRoundSource`
+`models.py`
+- Shared constants:
+  - logical PK columns
+  - tiebreak columns
+  - required lineage columns
+  - final-event statuses
+- `BronzeRoundSource` dataclass.
 
-- `silver_pdga_live_results/dynamo_io.py`
-  - Loads candidate events from DynamoDB (`METADATA`).
-  - Loads Silver checkpoints (`PIPELINE#SILVER_LIVE_RESULTS`).
-  - Loads live-results state rows (`LIVE_RESULTS#DIV#...#ROUND#...`).
-  - Reads/writes Silver event checkpoints.
-  - Writes Silver run summaries.
+`dynamo_io.py`
+- Candidate event loading from metadata.
+- Event checkpoint loading/writing.
+- Live-results state loading.
+- Silver run summary writing.
 
-- `silver_pdga_live_results/bronze_io.py`
-  - Resolves Bronze JSON source keys from state rows.
-  - Fallbacks to S3 prefix listing when state key is blank.
-  - Loads payload and optional sidecar metadata.
-  - Computes source hash/timestamps when missing.
-  - Computes event fingerprint for incremental skip logic.
+`bronze_io.py`
+- Resolves Bronze JSON keys by event/division/round.
+- Fallback to S3 listing if key missing.
+- Loads payload + optional sidecar metadata.
+- Computes source fingerprints.
 
-- `silver_pdga_live_results/normalize.py`
-  - Converts Bronze payloads to normalized row dicts:
-    - `player_rounds`
-    - `player_holes`
-  - Applies deterministic player key fallback:
-    - PDGA -> ResultID -> NameHash
-  - Enriches with event location fields from METADATA.
-  - Builds row hashes.
+`normalize.py`
+- Parses Bronze payload into `player_rounds` and `player_holes`.
+- Applies deterministic player key fallback.
+- Enriches rows with event/location metadata.
+- Computes `round_date_interp` for both tables using event-span interpolation.
+- Computes deterministic `row_hash_sha256`.
 
-- `silver_pdga_live_results/quality.py`
-  - Runs DQ checks before publish:
-    - duplicate keys
-    - lineage completeness
-    - parent-child integrity
-    - domain checks
-    - division collision guard
+`quality.py`
+- DQ checks on normalized rows.
 
-- `silver_pdga_live_results/parquet_io.py`
-  - Writes Parquet bytes with `pyarrow`.
-  - Performs tmp write -> final copy for deterministic keys.
-  - Deletes stale hole parquet when event has no hole detail.
-  - Writes quarantine report JSON.
+`parquet_io.py`
+- Writes event parquet via tmp-then-copy.
+- Removes stale hole file for round-only events.
+- Writes quarantine error reports.
 
-- `silver_pdga_live_results/runner.py`
-  - CLI entrypoint and orchestrator.
-  - Handles run mode selection (`pending_only` vs `full_check`).
-  - Event loop:
-    - load candidates
-    - filter pending (run mode dependent)
-    - resolve Bronze sources
-    - fingerprint compare with checkpoint
-    - normalize
-    - dedup
-    - DQ
-    - write parquet
-    - checkpoint + run summary
-  - Emits structured progress logs and summary.
+`runner.py`
+- CLI orchestration and event loop.
+- Selection logic, skip logic, DQ handling, writes, checkpoints, summaries.
 
-## Run Modes
+## Selection logic in runner
 
-### pending_only (default)
-Used when `--event-ids` is not provided.
+`--run-mode pending_only` (default):
+- includes missing checkpoint
+- includes `failed`
+- excludes `success` with fingerprint
+- excludes `dq_failed` by default
+- includes `dq_failed` only with `--include-dq-failed-in-pending`
 
-Selection logic:
-- include event if checkpoint missing
-- include event if checkpoint status is `failed` or `dq_failed` (or blank)
-- include event if checkpoint status is `success` but fingerprint is blank
-- exclude event if checkpoint status is `success` with valid fingerprint
+`--run-mode full_check`:
+- evaluates all candidates
 
-This is the fast resume mode for stable/final Bronze data.
+`--force-events`:
+- disables unchanged fingerprint skip for selected events
 
-### full_check
-Used when you want all candidates evaluated again.
-- Still uses per-event fingerprint skip in-processing.
-- More expensive than `pending_only`.
+## Per-event lifecycle
 
-### event-ids override
-If `--event-ids` is provided, explicit IDs are used directly regardless of run mode filtering.
-
-## Processing Lifecycle (Per Selected Event)
-
-1. Load live-results state rows from DynamoDB.
-2. Resolve Bronze source payloads (`BronzeRoundSource` list).
-3. Validate expected `(division, round)` coverage from `division_rounds`.
-4. Compute `event_source_fingerprint`.
-5. Skip as unchanged only when:
-   - checkpoint status is `success`
-   - fingerprint matches
-   - `--force-events` is not set
-6. Normalize to `player_rounds` + `player_holes`.
-7. Deduplicate by logical key with deterministic tie-break columns.
-8. Validate DQ checks.
-9. On DQ pass:
-   - write Parquet
+1. Load event live-results state rows.
+2. Resolve Bronze sources.
+3. Validate expected division/round coverage.
+4. Compute event fingerprint.
+5. Skip unchanged on matching successful fingerprint (unless `--force-events`).
+6. Normalize records:
+   - round rows
+   - hole rows
+   - `round_date_interp` fields
+7. Dedup by logical keys + tiebreak.
+8. Run DQ checks.
+9. On pass:
+   - write parquet
    - write success checkpoint
 10. On DQ fail:
-    - write quarantine report
-    - write `dq_failed` checkpoint
+   - write quarantine report
+   - checkpoint status `dq_failed`
 11. On exception:
-    - write `failed` checkpoint
-12. Continue to next event.
+   - checkpoint status `failed`
 
-## Run-Level Metrics (`RunStats`)
+## Round interpolation details
+
+`normalize.py` computes event `max_round_number` and applies:
+- multi-day event: linear span interpolation by round number
+- single-day/no-span: `event_start_date`
+- missing start date: blank value + fallback method
+
+Fields added to both row types:
+- `round_date_interp`
+- `round_date_interp_method`
+- `round_date_interp_confidence`
+
+## Run metrics
+
+Runner tracks:
 - `attempted_events`
 - `processed_events`
 - `skipped_unchanged_events`
@@ -123,20 +108,7 @@ If `--event-ids` is provided, explicit IDs are used directly regardless of run m
 - `round_rows_written`
 - `hole_rows_written`
 
-These are printed and stored in DynamoDB run summary.
-
-## Why This Design
-- `pending_only` keeps reruns fast for finalized Bronze datasets.
-- Checkpoint-driven selection avoids wasteful full event rechecks.
-- Fingerprint checks preserve idempotency and replayability.
-- Deterministic output keys guarantee overwrite-safe writes.
-- DQ gate prevents silent corruption.
-- Round-only event support avoids false failures when hole detail is unavailable.
-
-## Known Edge Cases Handled
-- Missing `latest_s3_json_key` in state rows
-- Missing sidecar metadata object
-- Missing `PDGANum`
-- Sparse payloads where hole detail is absent
-- GSI projection gaps for `live_results_ingested` filter
-- Retry path where failed/dq_failed events should not be skipped
+Progress emitted every `--progress-every` events.
+Run summary written to DynamoDB:
+- `pk=RUN#<run_id>`
+- `sk=SILVER_LIVE_RESULTS#SUMMARY`

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -68,6 +68,24 @@ def _parse_pdga_timestamp(raw: Any) -> str:
     return ""
 
 
+def _parse_iso_date(raw: Any) -> datetime.date | None:
+    text = _normalize_text(raw)
+    if not text:
+        return None
+
+    if DATE_PREFIX_RE.match(text):
+        try:
+            return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.date()
+    except ValueError:
+        return None
+
+
 def _derive_event_year(event_metadata: dict[str, Any], round_sources: list[BronzeRoundSource]) -> int:
     for key in ("end_date", "start_date"):
         value = _normalize_text(event_metadata.get(key))
@@ -80,6 +98,58 @@ def _derive_event_year(event_metadata: dict[str, Any], round_sources: list[Bronz
             return int(fetched[:4])
 
     return datetime.utcnow().year
+
+
+def _derive_max_round_number(event_metadata: dict[str, Any], round_sources: list[BronzeRoundSource]) -> int:
+    max_round = 1
+
+    division_rounds = event_metadata.get("division_rounds")
+    if isinstance(division_rounds, dict):
+        for value in division_rounds.values():
+            v = _to_int(value)
+            if v is not None and v > max_round:
+                max_round = v
+
+    for src in round_sources:
+        if src.round_number > max_round:
+            max_round = int(src.round_number)
+
+        payload = src.payload if isinstance(src.payload, dict) else {}
+        data = payload.get("data") if isinstance(payload, dict) else {}
+        scores = data.get("scores") if isinstance(data, dict) else None
+        if isinstance(scores, list):
+            for score in scores:
+                if not isinstance(score, dict):
+                    continue
+                r = _to_int(score.get("Round"))
+                if r is not None and r > max_round:
+                    max_round = r
+
+    return max_round
+
+
+def _compute_round_date_interp(
+    *,
+    start_date_raw: str,
+    end_date_raw: str,
+    round_number: int,
+    max_round_number: int,
+) -> tuple[str, str, float]:
+    start_date = _parse_iso_date(start_date_raw)
+    if start_date is None:
+        return "", "missing_start_date", 0.30
+
+    end_date = _parse_iso_date(end_date_raw)
+    if end_date is None:
+        return start_date.isoformat(), "event_start_fallback_no_end_date", 0.50
+
+    span_days = (end_date - start_date).days
+    if span_days <= 0 or max_round_number <= 1:
+        return start_date.isoformat(), "event_start_single_day", 1.00
+
+    offset_days = ((int(round_number) - 1) * span_days) // (max_round_number - 1)
+    interp_date = start_date + timedelta(days=int(offset_days))
+    return interp_date.isoformat(), "event_span_linear", 0.70
 
 
 def _derive_player_key(score: dict[str, Any], event_id: int) -> tuple[str, str, int | None, int | None]:
@@ -185,6 +255,7 @@ def normalize_event_records(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     event_id = int(event_metadata["event_id"])
     event_year = _derive_event_year(event_metadata, round_sources)
+    max_round_number = _derive_max_round_number(event_metadata, round_sources)
 
     event_location_raw = _normalize_text(event_metadata.get("location_raw")) or _normalize_text(event_metadata.get("raw_location"))
     event_city = _normalize_text(event_metadata.get("city"))
@@ -218,6 +289,13 @@ def normalize_event_records(
             round_number = _to_int(score.get("Round")) or source.round_number
             if round_number <= 0:
                 continue
+
+            round_date_interp, round_date_interp_method, round_date_interp_confidence = _compute_round_date_interp(
+                start_date_raw=event_start_date,
+                end_date_raw=event_end_date,
+                round_number=int(round_number),
+                max_round_number=max_round_number,
+            )
 
             division = _normalize_text(score.get("Division")) or source.division
             player_key, player_key_type, pdga_num, result_id = _derive_player_key(score, event_id)
@@ -265,6 +343,9 @@ def normalize_event_records(
                 "event_status_text": event_status_text,
                 "event_start_date": event_start_date,
                 "event_end_date": event_end_date,
+                "round_date_interp": round_date_interp,
+                "round_date_interp_method": round_date_interp_method,
+                "round_date_interp_confidence": round_date_interp_confidence,
                 "event_location_raw": event_location_raw,
                 "event_city": event_city,
                 "event_state": event_state,
@@ -354,6 +435,9 @@ def normalize_event_records(
                     "event_country": event_country,
                     "event_start_date": event_start_date,
                     "event_end_date": event_end_date,
+                    "round_date_interp": round_date_interp,
+                    "round_date_interp_method": round_date_interp_method,
+                    "round_date_interp_confidence": round_date_interp_confidence,
                     "layout_id": layout_id,
                     "layout_name": layout_name,
                     "course_id": course_id,

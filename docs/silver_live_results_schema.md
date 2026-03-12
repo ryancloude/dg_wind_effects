@@ -50,6 +50,25 @@ Mapping:
 - `event_state = state`
 - `event_country = country`
 
+## Round Date Interpolation Contract
+Both tables include deterministic round-date interpolation fields:
+- `round_date_interp`
+- `round_date_interp_method`
+- `round_date_interp_confidence`
+
+Behavior:
+- For multi-day events (`event_start_date < event_end_date`), interpolation is always applied.
+- For single-day events or no span, `event_start_date` is used.
+- If `event_start_date` is missing/invalid, interpolation output is blank and method indicates fallback.
+
+Formula:
+- `span_days = max(0, end_date - start_date)`
+- If `max_round_number > 1` and `span_days > 0`:
+  - `offset_days = floor((round_number - 1) * span_days / (max_round_number - 1))`
+  - `round_date_interp = start_date + offset_days`
+- Else:
+  - `round_date_interp = start_date` (or blank if start date missing)
+
 ## Table: player_rounds
 
 ### Grain
@@ -82,6 +101,9 @@ One row per player per round per event.
 | event_status_text | STRING | no | Event status |
 | event_start_date | STRING | no | Event start date (`YYYY-MM-DD`) |
 | event_end_date | STRING | no | Event end date (`YYYY-MM-DD`) |
+| round_date_interp | STRING | no | Interpolated round date (`YYYY-MM-DD`) |
+| round_date_interp_method | STRING | no | Method used to produce `round_date_interp` |
+| round_date_interp_confidence | DOUBLE | no | Confidence score for interpolation |
 | event_location_raw | STRING | no | Event location raw text |
 | event_city | STRING | no | Event city |
 | event_state | STRING | no | Event state |
@@ -157,6 +179,9 @@ One row per player per hole per round per event.
 | event_country | STRING | no | Event country |
 | event_start_date | STRING | no | Event start date |
 | event_end_date | STRING | no | Event end date |
+| round_date_interp | STRING | no | Interpolated round date (`YYYY-MM-DD`) |
+| round_date_interp_method | STRING | no | Method used to produce `round_date_interp` |
+| round_date_interp_confidence | DOUBLE | no | Confidence score for interpolation |
 | layout_id | BIGINT | no | Layout ID |
 | layout_name | STRING | no | Layout name |
 | course_id | BIGINT | no | Course ID |
@@ -243,6 +268,9 @@ If any DQ check fails:
 ## Incremental and Idempotent Contract
 - Process finalized + ingested events only
 - Build `event_source_fingerprint` from per-division/per-round Bronze source keys and hashes
+- Selection behavior:
+  - `pending_only` (default): excludes successful fingerprinted events and excludes `dq_failed` unless `--include-dq-failed-in-pending` is set
+  - `full_check`: evaluates all candidates
 - Skip unchanged events via checkpoint comparison (unless `--force-events`)
 - Overwrite only target event partition when changed
 - Bronze remains source of truth and replay layer
