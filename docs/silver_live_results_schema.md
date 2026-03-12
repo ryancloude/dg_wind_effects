@@ -122,6 +122,12 @@ One row per player per round per event.
 | tee_start | STRING | no | Tee start |
 | tee_time_raw | STRING | no | Tee time raw string |
 | tee_time_sort | STRING | no | Tee time sort key |
+| tee_time_est_ts | STRING | no | Estimated Tee Time |
+| tee_time_est_method | STRING | no | Method used to estimate Tee time |
+| tee_time_est_confidence | Double | no | Confidence in Estimated Tee Time |
+| lag_bucket_used | INT | no | Bucket used to find difference between scorecard updated and tee time |
+| lag_sample_size | INT | no | sample size of lag bucket |
+| round_duration_est_minutes | INT | no | Etimated duration of the round |
 | played_holes | SMALLINT | no | Holes played |
 | round_score | INT | no | Round strokes |
 | round_to_par | INT | no | Round to par |
@@ -187,6 +193,19 @@ One row per player per hole per round per event.
 | course_id | BIGINT | no | Course ID |
 | course_name | STRING | no | Course name |
 | layout_holes | SMALLINT | no | Layout hole count |
+| tee_start | STRING | no | Tee start |
+| tee_time_raw | STRING | no | Tee time raw string |
+| tee_time_sort | STRING | no | Tee time sort key |
+| tee_time_est_ts | STRING | no | Estimated Tee Time |
+| tee_time_est_method | STRING | no | Method used to estimate Tee time |
+| tee_time_est_confidence | Double | no | Confidence in Estimated Tee Time |
+| lag_bucket_used | INT | no | Bucket used to find difference between scorecard updated and tee time |
+| lag_sample_size | INT | no | sample size of lag bucket |
+| round_duration_est_minutes | INT | no | Etimated duration of the round |
+| hole_start_est_ts | STRING | no | estimated hole start time |
+| hole_end_est_ts | STRING | no | estimate time for hole end |
+| lhole_time_est_method | STRING | no | method used to estimate the hole time |
+| hole_time_est_confidence | DOUBLE | no | Confidence in hole time estimation |
 | hole_code | STRING | no | Source hole code (`H1`) |
 | hole_label | STRING | no | Hole label |
 | hole_ordinal | SMALLINT | no | Hole ordinal from source |
@@ -244,6 +263,20 @@ Tie-break order for both:
 2. `scorecard_updated_at_ts`
 3. `update_date_ts`
 4. `source_json_key`
+
+## Tee Time Estimation (v1)
+For rows missing `tee_time_raw`:
+- if `scorecard_updated_at_ts` exists, estimate:
+  - `tee_time_est_ts = scorecard_updated_at_ts - 449 minutes`
+  - method: `score_minus_global_median_lag`
+  - confidence: `0.55`
+- if `tee_time_raw` exists and score timestamp exists:
+  - align tee time to same/previous day so tee is never after score timestamp
+  - method: `raw_tee_time`
+  - confidence: `1.00`
+- if both are missing:
+  - method: `missing_inputs`
+  - confidence: `0.00`
 
 ## Data Quality Constraints
 - Uniqueness of logical PK in each table

@@ -10,6 +10,7 @@ from typing import Any
 from silver_pdga_live_results.models import BronzeRoundSource
 
 DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+GLOBAL_MEDIAN_LAG_MINUTES = 449
 
 
 def _normalize_text(value: Any) -> str:
@@ -68,6 +69,18 @@ def _parse_pdga_timestamp(raw: Any) -> str:
     return ""
 
 
+def _parse_ts(text: str) -> datetime | None:
+    value = _normalize_text(text)
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _parse_iso_date(raw: Any) -> datetime.date | None:
     text = _normalize_text(raw)
     if not text:
@@ -84,6 +97,26 @@ def _parse_iso_date(raw: Any) -> datetime.date | None:
         return parsed.date()
     except ValueError:
         return None
+
+
+def _parse_tee_clock(raw: str) -> tuple[int, int, int] | None:
+    value = _normalize_text(raw)
+    if not value:
+        return None
+
+    for fmt in ("%H:%M:%S", "%H:%M", "%I:%M %p", "%I:%M:%S %p"):
+        try:
+            dt = datetime.strptime(value, fmt)
+            return dt.hour, dt.minute, dt.second
+        except ValueError:
+            continue
+    return None
+
+
+def _format_ts(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def _derive_event_year(event_metadata: dict[str, Any], round_sources: list[BronzeRoundSource]) -> int:
@@ -150,6 +183,71 @@ def _compute_round_date_interp(
     offset_days = ((int(round_number) - 1) * span_days) // (max_round_number - 1)
     interp_date = start_date + timedelta(days=int(offset_days))
     return interp_date.isoformat(), "event_span_linear", 0.70
+
+
+def _estimate_tee_time(
+    *,
+    tee_time_raw: str,
+    scorecard_updated_at_ts: str,
+    round_date_interp: str,
+) -> dict[str, Any]:
+    score_dt = _parse_ts(scorecard_updated_at_ts)
+    tee_clock = _parse_tee_clock(tee_time_raw)
+
+    if tee_clock is not None:
+        hour, minute, second = tee_clock
+
+        if score_dt is not None:
+            tee_dt = score_dt.replace(hour=hour, minute=minute, second=second, microsecond=0)
+            # If tee clock is after score clock, tee belongs to previous day.
+            if tee_dt > score_dt:
+                tee_dt = tee_dt - timedelta(days=1)
+
+            lag_min = max(int((score_dt - tee_dt).total_seconds() // 60), 0)
+            return {
+                "tee_time_est_ts": _format_ts(tee_dt),
+                "tee_time_est_method": "raw_tee_time",
+                "tee_time_est_confidence": 1.00,
+                "lag_minutes_used": lag_min,
+                "lag_bucket_used": "raw",
+                "lag_sample_size": None,
+                "round_duration_est_minutes": lag_min,
+            }
+
+        interp_date = _parse_iso_date(round_date_interp)
+        if interp_date is not None:
+            tee_dt = datetime.combine(interp_date, datetime.min.time()).replace(hour=hour, minute=minute, second=second)
+            return {
+                "tee_time_est_ts": _format_ts(tee_dt),
+                "tee_time_est_method": "raw_tee_time_no_score_ts",
+                "tee_time_est_confidence": 0.90,
+                "lag_minutes_used": None,
+                "lag_bucket_used": "raw",
+                "lag_sample_size": None,
+                "round_duration_est_minutes": None,
+            }
+
+    if score_dt is not None:
+        tee_dt = score_dt - timedelta(minutes=GLOBAL_MEDIAN_LAG_MINUTES)
+        return {
+            "tee_time_est_ts": _format_ts(tee_dt),
+            "tee_time_est_method": "score_minus_global_median_lag",
+            "tee_time_est_confidence": 0.55,
+            "lag_minutes_used": GLOBAL_MEDIAN_LAG_MINUTES,
+            "lag_bucket_used": "global",
+            "lag_sample_size": None,
+            "round_duration_est_minutes": GLOBAL_MEDIAN_LAG_MINUTES,
+        }
+
+    return {
+        "tee_time_est_ts": "",
+        "tee_time_est_method": "missing_inputs",
+        "tee_time_est_confidence": 0.00,
+        "lag_minutes_used": None,
+        "lag_bucket_used": "none",
+        "lag_sample_size": None,
+        "round_duration_est_minutes": None,
+    }
 
 
 def _derive_player_key(score: dict[str, Any], event_id: int) -> tuple[str, str, int | None, int | None]:
@@ -237,6 +335,40 @@ def _extract_hole_scores(score: dict[str, Any], layout_holes: int | None) -> lis
 
     return parsed
 
+def _estimate_hole_times(
+    *,
+    tee_time_est_ts: str,
+    round_duration_est_minutes: int | None,
+    hole_numbers: list[int],
+) -> dict[int, tuple[str, str]]:
+    """
+    Returns {hole_number: (hole_start_est_ts, hole_end_est_ts)}.
+    v1 uses uniform duration across scored holes.
+    """
+    if not hole_numbers:
+        return {}
+
+    round_start_dt = _parse_ts(tee_time_est_ts)
+    if round_start_dt is None or round_duration_est_minutes is None or round_duration_est_minutes <= 0:
+        return {}
+
+    ordered = sorted(hole_numbers)
+    n = len(ordered)
+    total_seconds = int(round_duration_est_minutes * 60)
+    per_hole_seconds = max(total_seconds // n, 1)
+
+    out: dict[int, tuple[str, str]] = {}
+    for idx, hole_num in enumerate(ordered):
+        start_dt = round_start_dt + timedelta(seconds=idx * per_hole_seconds)
+        # make final hole end exactly round_start + total_seconds
+        if idx == n - 1:
+            end_dt = round_start_dt + timedelta(seconds=total_seconds)
+        else:
+            end_dt = round_start_dt + timedelta(seconds=(idx + 1) * per_hole_seconds)
+
+        out[hole_num] = (_format_ts(start_dt), _format_ts(end_dt))
+
+    return out
 
 def _row_hash(row: dict[str, Any]) -> str:
     ignored = {"row_hash_sha256", "silver_run_id", "silver_processed_at_utc"}
@@ -315,6 +447,13 @@ def normalize_event_records(
             scorecard_updated_at_ts = _parse_pdga_timestamp(scorecard_updated_at_raw)
             update_date_ts = _parse_pdga_timestamp(update_date_raw)
 
+            tee_time_raw = _normalize_text(score.get("TeeTime"))
+            tee_est = _estimate_tee_time(
+                tee_time_raw=tee_time_raw,
+                scorecard_updated_at_ts=scorecard_updated_at_ts,
+                round_date_interp=round_date_interp,
+            )
+
             played_holes = _to_int(score.get("Played"))
             round_score = _to_int(score.get("RoundScore"))
             round_to_par = _to_int(score.get("RoundtoPar"))
@@ -362,8 +501,15 @@ def normalize_event_records(
                 "round_pool": _normalize_text(score.get("RoundPool")),
                 "card_num": _to_int(score.get("CardNum")),
                 "tee_start": _normalize_text(score.get("TeeStart")),
-                "tee_time_raw": _normalize_text(score.get("TeeTime")),
+                "tee_time_raw": tee_time_raw,
                 "tee_time_sort": _normalize_text(score.get("TeeTimeSort")),
+                "tee_time_est_ts": tee_est["tee_time_est_ts"],
+                "tee_time_est_method": tee_est["tee_time_est_method"],
+                "tee_time_est_confidence": tee_est["tee_time_est_confidence"],
+                "lag_minutes_used": tee_est["lag_minutes_used"],
+                "lag_bucket_used": tee_est["lag_bucket_used"],
+                "lag_sample_size": tee_est["lag_sample_size"],
+                "round_duration_est_minutes": tee_est["round_duration_est_minutes"],
                 "played_holes": played_holes,
                 "round_score": round_score,
                 "round_to_par": round_to_par,
@@ -397,6 +543,13 @@ def normalize_event_records(
             round_rows.append(base_round)
 
             hole_scores = _extract_hole_scores(score, layout_holes)
+            scored_hole_numbers = [idx for idx, value in enumerate(hole_scores, start=1) if value is not None]
+            hole_time_map = _estimate_hole_times(
+                tee_time_est_ts=tee_est["tee_time_est_ts"],
+                round_duration_est_minutes=tee_est["round_duration_est_minutes"],
+                hole_numbers=scored_hole_numbers,
+            )
+
             hole_map = holes_by_layout.get(layout_id or -1, {}) or fallback_holes
 
             if played_holes is None:
@@ -450,6 +603,17 @@ def normalize_event_records(
                     "hole_length": hole_length,
                     "hole_score": hole_score,
                     "hole_to_par": (hole_score - hole_par) if hole_par is not None else None,
+                    "tee_time_raw": tee_time_raw,
+                    "tee_time_est_ts": tee_est["tee_time_est_ts"],
+                    "tee_time_est_method": tee_est["tee_time_est_method"],
+                    "tee_time_est_confidence": tee_est["tee_time_est_confidence"],
+                    "lag_minutes_used": tee_est["lag_minutes_used"],
+                    "lag_bucket_used": tee_est["lag_bucket_used"],
+                    "round_duration_est_minutes": tee_est["round_duration_est_minutes"],
+                    "hole_start_est_ts": hole_time_map.get(hole_number, ("", ""))[0],
+                    "hole_end_est_ts": hole_time_map.get(hole_number, ("", ""))[1],
+                    "hole_time_est_method": "uniform_from_round_duration" if hole_number in hole_time_map else "missing_round_time_inputs",
+                    "hole_time_est_confidence": 0.60 if hole_number in hole_time_map else 0.00,
                     "played_holes": played_holes,
                     "round_score": round_score,
                     "round_to_par": round_to_par,

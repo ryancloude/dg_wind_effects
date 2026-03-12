@@ -87,13 +87,80 @@ def test_normalize_uses_result_id_fallback_and_enriches_location():
     assert round_row["event_city"] == "Blackwell"
     assert round_row["event_state"] == "OK"
     assert round_row["event_country"] == "US"
-    assert round_row["round_date_interp"] == "2025-05-17"
-    assert round_row["round_date_interp_method"] == "event_start_single_day"
+
+    assert round_row["tee_time_est_method"] == "missing_inputs"
+    assert round_row["tee_time_est_ts"] == ""
 
     assert {row["hole_number"] for row in hole_rows} == {1, 2}
     assert {row["hole_score"] for row in hole_rows} == {2, 3}
-    assert {row["round_date_interp"] for row in hole_rows} == {"2025-05-17"}
 
+def test_hole_time_estimation_and_tee_time_raw_in_holes():
+    event_metadata = {
+        "event_id": 93001,
+        "status_text": "Event complete; official ratings processed.",
+        "start_date": "2025-06-20",
+        "end_date": "2025-06-20",
+    }
+
+    payload = {
+        "data": {
+            "scores": [
+                {
+                    "Division": "MPO",
+                    "Round": 1,
+                    "LayoutID": 1,
+                    "Name": "Player X",
+                    "PDGANum": 999,
+                    "TeeTime": "09:00:00",
+                    "ScorecardUpdatedAt": "2025-06-20 10:00:00",
+                    "HoleScores": ["3", "4"],
+                    "Holes": 2,
+                    "Played": 2,
+                    "RoundScore": 7,
+                    "RoundtoPar": 1,
+                    "RoundStatus": "I",
+                }
+            ],
+            "layouts": [
+                {
+                    "LayoutID": 1,
+                    "Name": "Main",
+                    "Holes": 2,
+                    "Par": 6,
+                    "Detail": [
+                        {"Ordinal": 1, "Hole": "H1", "Par": 3, "Length": 300},
+                        {"Ordinal": 2, "Hole": "H2", "Par": 3, "Length": 280},
+                    ],
+                }
+            ],
+            "holes": [],
+        }
+    }
+
+    source = BronzeRoundSource(
+        event_id=93001,
+        division="MPO",
+        round_number=1,
+        source_json_key="k.json",
+        source_meta_key="k.meta.json",
+        source_content_sha256="sha",
+        source_fetched_at_utc="2025-06-20T12:00:00Z",
+        payload=payload,
+    )
+
+    _, hole_rows = normalize_event_records(
+        event_metadata=event_metadata,
+        round_sources=[source],
+        event_source_fingerprint="fp",
+        run_id="run",
+        silver_processed_at_utc="2026-03-12T10:00:00Z",
+    )
+
+    assert len(hole_rows) == 2
+    assert {r["tee_time_raw"] for r in hole_rows} == {"09:00:00"}
+    assert all(r["hole_time_est_method"] == "uniform_from_round_duration" for r in hole_rows)
+    assert all(r["hole_start_est_ts"] != "" for r in hole_rows)
+    assert all(r["hole_end_est_ts"] != "" for r in hole_rows)
 
 def test_normalize_falls_back_to_scores_string_when_hole_scores_missing():
     event_metadata = {
@@ -159,31 +226,42 @@ def test_normalize_falls_back_to_scores_string_when_hole_scores_missing():
     assert [row["hole_score"] for row in hole_rows] == [3, 4]
 
 
-def test_round_date_interp_multi_day_event_linear_mapping():
+def test_tee_estimation_missing_tee_uses_global_lag():
     event_metadata = {
-        "event_id": 91000,
-        "name": "Multi-Day Championship",
+        "event_id": 92001,
         "status_text": "Event complete; official ratings processed.",
         "start_date": "2025-06-20",
-        "end_date": "2025-06-22",
-        "division_rounds": {"MPO": 4},
+        "end_date": "2025-06-20",
     }
 
     payload = {
         "data": {
             "scores": [
-                {"Division": "MPO", "Round": 1, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
-                {"Division": "MPO", "Round": 2, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
-                {"Division": "MPO", "Round": 3, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
-                {"Division": "MPO", "Round": 4, "LayoutID": 1, "Name": "A", "PDGANum": 1001, "HoleScores": ["3"], "Holes": 1, "Played": 1, "RoundScore": 3, "RoundtoPar": 0, "RoundStatus": "I"},
+                {
+                    "Division": "MPO",
+                    "Round": 1,
+                    "LayoutID": 1,
+                    "Name": "Player A",
+                    "PDGANum": 111,
+                    "HoleScores": ["3", "3"],
+                    "Holes": 2,
+                    "Played": 2,
+                    "RoundScore": 6,
+                    "RoundtoPar": 0,
+                    "RoundStatus": "I",
+                    "ScorecardUpdatedAt": "2025-06-20 09:49:05",
+                }
             ],
             "layouts": [
                 {
                     "LayoutID": 1,
-                    "Name": "Champ",
-                    "Holes": 1,
-                    "Par": 3,
-                    "Detail": [{"Ordinal": 1, "Hole": "H1", "Par": 3, "Length": 300}],
+                    "Name": "Main",
+                    "Holes": 2,
+                    "Par": 6,
+                    "Detail": [
+                        {"Ordinal": 1, "Hole": "H1", "Par": 3, "Length": 300},
+                        {"Ordinal": 2, "Hole": "H2", "Par": 3, "Length": 300},
+                    ],
                 }
             ],
             "holes": [],
@@ -191,44 +269,43 @@ def test_round_date_interp_multi_day_event_linear_mapping():
     }
 
     source = BronzeRoundSource(
-        event_id=91000,
+        event_id=92001,
         division="MPO",
         round_number=1,
-        source_json_key="k.json",
-        source_meta_key="k.meta.json",
+        source_json_key="x.json",
+        source_meta_key="x.meta.json",
         source_content_sha256="sha",
-        source_fetched_at_utc="2025-06-22T20:00:00Z",
+        source_fetched_at_utc="2025-06-20T15:00:00Z",
         payload=payload,
     )
 
     round_rows, hole_rows = normalize_event_records(
         event_metadata=event_metadata,
         round_sources=[source],
-        event_source_fingerprint="fp3",
-        run_id="run-3",
-        silver_processed_at_utc="2026-03-11T10:00:00Z",
+        event_source_fingerprint="fp",
+        run_id="run-tee-est",
+        silver_processed_at_utc="2026-03-12T10:00:00Z",
     )
 
-    assert len(round_rows) == 4
-    assert len(hole_rows) == 4
+    assert len(round_rows) == 1
+    rr = round_rows[0]
+    assert rr["tee_time_est_method"] == "score_minus_global_median_lag"
+    assert rr["lag_minutes_used"] == 449
+    assert rr["lag_bucket_used"] == "global"
+    assert rr["round_duration_est_minutes"] == 449
+    assert rr["tee_time_est_ts"] == "2025-06-20T02:20:05"
 
-    by_round = {row["round_number"]: row["round_date_interp"] for row in round_rows}
-    assert by_round[1] == "2025-06-20"
-    assert by_round[2] == "2025-06-20"
-    assert by_round[3] == "2025-06-21"
-    assert by_round[4] == "2025-06-22"
-
-    assert {row["round_date_interp_method"] for row in round_rows} == {"event_span_linear"}
-    assert {row["round_date_interp_method"] for row in hole_rows} == {"event_span_linear"}
+    assert len(hole_rows) == 2
+    assert {h["tee_time_est_method"] for h in hole_rows} == {"score_minus_global_median_lag"}
+    assert {h["tee_time_est_ts"] for h in hole_rows} == {"2025-06-20T02:20:05"}
 
 
-def test_round_date_interp_missing_start_date_fallback():
+def test_tee_estimation_raw_tee_aligns_previous_day_when_needed():
     event_metadata = {
-        "event_id": 91001,
-        "name": "Bad Dates Open",
+        "event_id": 92002,
         "status_text": "Event complete; official ratings processed.",
-        "start_date": "",
-        "end_date": "2025-06-22",
+        "start_date": "2025-06-20",
+        "end_date": "2025-06-20",
     }
 
     payload = {
@@ -238,20 +315,22 @@ def test_round_date_interp_missing_start_date_fallback():
                     "Division": "MPO",
                     "Round": 1,
                     "LayoutID": 2,
-                    "Name": "B",
-                    "PDGANum": 1002,
+                    "Name": "Player B",
+                    "PDGANum": 222,
+                    "TeeTime": "11:30:00",
                     "HoleScores": ["3"],
                     "Holes": 1,
                     "Played": 1,
                     "RoundScore": 3,
                     "RoundtoPar": 0,
                     "RoundStatus": "I",
+                    "ScorecardUpdatedAt": "2025-06-20 01:30:00",
                 }
             ],
             "layouts": [
                 {
                     "LayoutID": 2,
-                    "Name": "Fallback",
+                    "Name": "Night",
                     "Holes": 1,
                     "Par": 3,
                     "Detail": [{"Ordinal": 1, "Hole": "H1", "Par": 3, "Length": 250}],
@@ -262,31 +341,30 @@ def test_round_date_interp_missing_start_date_fallback():
     }
 
     source = BronzeRoundSource(
-        event_id=91001,
+        event_id=92002,
         division="MPO",
         round_number=1,
-        source_json_key="k2.json",
-        source_meta_key="k2.meta.json",
-        source_content_sha256="sha2",
-        source_fetched_at_utc="2025-06-22T20:00:00Z",
+        source_json_key="y.json",
+        source_meta_key="y.meta.json",
+        source_content_sha256="sha",
+        source_fetched_at_utc="2025-06-20T15:00:00Z",
         payload=payload,
     )
 
     round_rows, hole_rows = normalize_event_records(
         event_metadata=event_metadata,
         round_sources=[source],
-        event_source_fingerprint="fp4",
-        run_id="run-4",
-        silver_processed_at_utc="2026-03-11T10:00:00Z",
+        event_source_fingerprint="fp",
+        run_id="run-tee-est-2",
+        silver_processed_at_utc="2026-03-12T10:00:00Z",
     )
+    
+    rr = round_rows[0]
+    assert rr["tee_time_est_method"] == "raw_tee_time"
+    assert rr["tee_time_est_ts"] == "2025-06-19T11:30:00"
+    assert rr["lag_minutes_used"] == 840
+    assert rr["lag_bucket_used"] == "raw"
 
-    assert len(round_rows) == 1
-    assert len(hole_rows) == 1
-
-    assert round_rows[0]["round_date_interp"] == ""
-    assert round_rows[0]["round_date_interp_method"] == "missing_start_date"
-    assert round_rows[0]["round_date_interp_confidence"] == 0.30
-
-    assert hole_rows[0]["round_date_interp"] == ""
-    assert hole_rows[0]["round_date_interp_method"] == "missing_start_date"
-    assert hole_rows[0]["round_date_interp_confidence"] == 0.30
+    hr = hole_rows[0]
+    assert hr["tee_time_est_method"] == "raw_tee_time"
+    assert hr["tee_time_est_ts"] == "2025-06-19T11:30:00"
