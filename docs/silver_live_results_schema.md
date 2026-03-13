@@ -69,6 +69,39 @@ Formula:
 - Else:
   - `round_date_interp = start_date` (or blank if start date missing)
 
+## Tee Time Estimation Contract
+Silver stores estimated tee-time metadata:
+- `tee_time_est_ts`
+- `tee_time_est_method`
+- `tee_time_est_confidence`
+- `lag_minutes_used`
+- `lag_bucket_used`
+- `lag_sample_size` (rounds table only)
+- `round_duration_est_minutes`
+
+Behavior:
+- `raw_tee_time`: `tee_time_raw` and `scorecard_updated_at_ts` present; tee is aligned to same/previous day to ensure tee is not after scorecard update.
+- `raw_tee_time_no_score_ts`: `tee_time_raw` present, scorecard timestamp missing; tee is anchored to `round_date_interp`.
+- `score_minus_global_median_lag`: `tee_time_raw` missing, scorecard timestamp present; tee estimated via global lag.
+- `missing_inputs`: both tee and scorecard timestamp unavailable.
+
+Current fixed policy:
+- `round_duration_est_minutes = 240` (4 hours) for all rows.
+- Round duration is not inferred from `scorecard_updated_at_ts`.
+
+## Hole Time Estimation Contract
+`player_holes` includes:
+- `hole_start_est_ts`
+- `hole_end_est_ts`
+- `hole_time_est_method`
+- `hole_time_est_confidence`
+
+Behavior:
+- Hole times are estimated from `tee_time_est_ts` plus a uniform split of `round_duration_est_minutes` across scored holes.
+- If round start/duration inputs are missing, hole times remain blank with:
+  - `hole_time_est_method = missing_round_time_inputs`
+  - low confidence.
+
 ## Table: player_rounds
 
 ### Grain
@@ -122,12 +155,13 @@ One row per player per round per event.
 | tee_start | STRING | no | Tee start |
 | tee_time_raw | STRING | no | Tee time raw string |
 | tee_time_sort | STRING | no | Tee time sort key |
-| tee_time_est_ts | STRING | no | Estimated Tee Time |
-| tee_time_est_method | STRING | no | Method used to estimate Tee time |
-| tee_time_est_confidence | Double | no | Confidence in Estimated Tee Time |
-| lag_bucket_used | INT | no | Bucket used to find difference between scorecard updated and tee time |
-| lag_sample_size | INT | no | sample size of lag bucket |
-| round_duration_est_minutes | INT | no | Etimated duration of the round |
+| tee_time_est_ts | STRING | no | Estimated tee timestamp (local) |
+| tee_time_est_method | STRING | no | Method used to estimate tee time |
+| tee_time_est_confidence | DOUBLE | no | Confidence score for tee estimate |
+| lag_minutes_used | INT | no | Lag minutes used in tee estimation |
+| lag_bucket_used | STRING | no | Lag source bucket (`raw`, `global`, `none`) |
+| lag_sample_size | INT | no | Sample size for lag bucket (nullable) |
+| round_duration_est_minutes | INT | no | Estimated round duration (fixed at 240) |
 | played_holes | SMALLINT | no | Holes played |
 | round_score | INT | no | Round strokes |
 | round_to_par | INT | no | Round to par |
@@ -193,19 +227,6 @@ One row per player per hole per round per event.
 | course_id | BIGINT | no | Course ID |
 | course_name | STRING | no | Course name |
 | layout_holes | SMALLINT | no | Layout hole count |
-| tee_start | STRING | no | Tee start |
-| tee_time_raw | STRING | no | Tee time raw string |
-| tee_time_sort | STRING | no | Tee time sort key |
-| tee_time_est_ts | STRING | no | Estimated Tee Time |
-| tee_time_est_method | STRING | no | Method used to estimate Tee time |
-| tee_time_est_confidence | Double | no | Confidence in Estimated Tee Time |
-| lag_bucket_used | INT | no | Bucket used to find difference between scorecard updated and tee time |
-| lag_sample_size | INT | no | sample size of lag bucket |
-| round_duration_est_minutes | INT | no | Etimated duration of the round |
-| hole_start_est_ts | STRING | no | estimated hole start time |
-| hole_end_est_ts | STRING | no | estimate time for hole end |
-| lhole_time_est_method | STRING | no | method used to estimate the hole time |
-| hole_time_est_confidence | DOUBLE | no | Confidence in hole time estimation |
 | hole_code | STRING | no | Source hole code (`H1`) |
 | hole_label | STRING | no | Hole label |
 | hole_ordinal | SMALLINT | no | Hole ordinal from source |
@@ -213,6 +234,17 @@ One row per player per hole per round per event.
 | hole_length | INT | no | Hole length |
 | hole_score | SMALLINT | no | Player strokes on hole |
 | hole_to_par | SMALLINT | no | `hole_score - hole_par` |
+| tee_time_raw | STRING | no | Tee time raw string |
+| tee_time_est_ts | STRING | no | Estimated tee timestamp (local) |
+| tee_time_est_method | STRING | no | Method used to estimate tee time |
+| tee_time_est_confidence | DOUBLE | no | Confidence score for tee estimate |
+| lag_minutes_used | INT | no | Lag minutes used in tee estimation |
+| lag_bucket_used | STRING | no | Lag source bucket (`raw`, `global`, `none`) |
+| round_duration_est_minutes | INT | no | Estimated round duration (fixed at 240) |
+| hole_start_est_ts | STRING | no | Estimated hole start time (local) |
+| hole_end_est_ts | STRING | no | Estimated hole end time (local) |
+| hole_time_est_method | STRING | no | Method used to estimate hole time |
+| hole_time_est_confidence | DOUBLE | no | Confidence score for hole time estimate |
 | played_holes | SMALLINT | no | Round-level denorm |
 | round_score | INT | no | Round-level denorm |
 | round_to_par | INT | no | Round-level denorm |
@@ -244,6 +276,7 @@ Quarantine keys:
 
 ## Round-Only Event Behavior
 Some finalized events do not include hole-by-hole detail.
+
 Behavior:
 - Event is still considered successful if `player_rounds` is non-empty.
 - `player_holes` may be empty.
@@ -263,20 +296,6 @@ Tie-break order for both:
 2. `scorecard_updated_at_ts`
 3. `update_date_ts`
 4. `source_json_key`
-
-## Tee Time Estimation (v1)
-For rows missing `tee_time_raw`:
-- if `scorecard_updated_at_ts` exists, estimate:
-  - `tee_time_est_ts = scorecard_updated_at_ts - 449 minutes`
-  - method: `score_minus_global_median_lag`
-  - confidence: `0.55`
-- if `tee_time_raw` exists and score timestamp exists:
-  - align tee time to same/previous day so tee is never after score timestamp
-  - method: `raw_tee_time`
-  - confidence: `1.00`
-- if both are missing:
-  - method: `missing_inputs`
-  - confidence: `0.00`
 
 ## Data Quality Constraints
 - Uniqueness of logical PK in each table

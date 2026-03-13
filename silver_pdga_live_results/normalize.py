@@ -11,7 +11,7 @@ from silver_pdga_live_results.models import BronzeRoundSource
 
 DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 GLOBAL_MEDIAN_LAG_MINUTES = 449
-
+FIXED_ROUND_DURATION_MINUTES = 240
 
 def _normalize_text(value: Any) -> str:
     if value is None:
@@ -133,6 +133,68 @@ def _derive_event_year(event_metadata: dict[str, Any], round_sources: list[Bronz
     return datetime.utcnow().year
 
 
+def _build_tee_time_join(
+    *,
+    tee_time_raw: str,
+    round_date_interp: str,
+    tee_time_est_ts: str,
+    scorecard_updated_at_ts: str,
+    event_start_date: str,
+) -> dict[str, Any]:
+    """
+    Local (non-UTC-converted) timestamp used for weather join.
+
+    Priority:
+    1) round_date_interp + tee_time_raw
+    2) tee_time_est_ts when tee raw missing but score exists
+    3) round_date_interp + 12:00:00
+    4) event_start_date + 12:00:00
+    5) blank
+    """
+    tee_clock = _parse_tee_clock(tee_time_raw)
+    round_date = _parse_iso_date(round_date_interp)
+
+    if tee_clock is not None and round_date is not None:
+        hour, minute, second = tee_clock
+        join_dt = datetime.combine(round_date, datetime.min.time()).replace(hour=hour, minute=minute, second=second)
+        return {
+            "tee_time_join_ts": _format_ts(join_dt),
+            "tee_time_join_method": "round_date_interp_plus_raw_tee",
+            "tee_time_join_confidence": 1.00,
+        }
+
+    # Explicit fallback path requested: when tee raw is missing, use existing score-based logic.
+    if not _normalize_text(tee_time_raw):
+        if _parse_ts(scorecard_updated_at_ts) is not None and _parse_ts(tee_time_est_ts) is not None:
+            return {
+                "tee_time_join_ts": tee_time_est_ts,
+                "tee_time_join_method": "fallback_score_based",
+                "tee_time_join_confidence": 0.55,
+            }
+
+        if round_date is not None:
+            noon_dt = datetime.combine(round_date, datetime.min.time()).replace(hour=12, minute=0, second=0)
+            return {
+                "tee_time_join_ts": _format_ts(noon_dt),
+                "tee_time_join_method": "round_date_interp_noon_fallback",
+                "tee_time_join_confidence": 0.30,
+            }
+
+    start_date = _parse_iso_date(event_start_date)
+    if start_date is not None:
+        noon_dt = datetime.combine(start_date, datetime.min.time()).replace(hour=12, minute=0, second=0)
+        return {
+            "tee_time_join_ts": _format_ts(noon_dt),
+            "tee_time_join_method": "event_start_noon_fallback",
+            "tee_time_join_confidence": 0.20,
+        }
+
+    return {
+        "tee_time_join_ts": "",
+        "tee_time_join_method": "missing_inputs",
+        "tee_time_join_confidence": 0.00,
+    }
+
 def _derive_max_round_number(event_metadata: dict[str, Any], round_sources: list[BronzeRoundSource]) -> int:
     max_round = 1
 
@@ -191,6 +253,8 @@ def _estimate_tee_time(
     scorecard_updated_at_ts: str,
     round_date_interp: str,
 ) -> dict[str, Any]:
+    FIXED_ROUND_DURATION_MINUTES = 240
+
     score_dt = _parse_ts(scorecard_updated_at_ts)
     tee_clock = _parse_tee_clock(tee_time_raw)
 
@@ -211,7 +275,7 @@ def _estimate_tee_time(
                 "lag_minutes_used": lag_min,
                 "lag_bucket_used": "raw",
                 "lag_sample_size": None,
-                "round_duration_est_minutes": lag_min,
+                "round_duration_est_minutes": FIXED_ROUND_DURATION_MINUTES,
             }
 
         interp_date = _parse_iso_date(round_date_interp)
@@ -224,7 +288,7 @@ def _estimate_tee_time(
                 "lag_minutes_used": None,
                 "lag_bucket_used": "raw",
                 "lag_sample_size": None,
-                "round_duration_est_minutes": None,
+                "round_duration_est_minutes": FIXED_ROUND_DURATION_MINUTES,
             }
 
     if score_dt is not None:
@@ -236,7 +300,7 @@ def _estimate_tee_time(
             "lag_minutes_used": GLOBAL_MEDIAN_LAG_MINUTES,
             "lag_bucket_used": "global",
             "lag_sample_size": None,
-            "round_duration_est_minutes": GLOBAL_MEDIAN_LAG_MINUTES,
+            "round_duration_est_minutes": FIXED_ROUND_DURATION_MINUTES,
         }
 
     return {
@@ -246,7 +310,7 @@ def _estimate_tee_time(
         "lag_minutes_used": None,
         "lag_bucket_used": "none",
         "lag_sample_size": None,
-        "round_duration_est_minutes": None,
+        "round_duration_est_minutes": FIXED_ROUND_DURATION_MINUTES,
     }
 
 
@@ -454,6 +518,14 @@ def normalize_event_records(
                 round_date_interp=round_date_interp,
             )
 
+            tee_join = _build_tee_time_join(
+                tee_time_raw=tee_time_raw,
+                round_date_interp=round_date_interp,
+                tee_time_est_ts=tee_est["tee_time_est_ts"],
+                scorecard_updated_at_ts=scorecard_updated_at_ts,
+                event_start_date=event_start_date,
+            )
+
             played_holes = _to_int(score.get("Played"))
             round_score = _to_int(score.get("RoundScore"))
             round_to_par = _to_int(score.get("RoundtoPar"))
@@ -506,6 +578,9 @@ def normalize_event_records(
                 "tee_time_est_ts": tee_est["tee_time_est_ts"],
                 "tee_time_est_method": tee_est["tee_time_est_method"],
                 "tee_time_est_confidence": tee_est["tee_time_est_confidence"],
+                "tee_time_join_ts": tee_join["tee_time_join_ts"],
+                "tee_time_join_method": tee_join["tee_time_join_method"],
+                "tee_time_join_confidence": tee_join["tee_time_join_confidence"],
                 "lag_minutes_used": tee_est["lag_minutes_used"],
                 "lag_bucket_used": tee_est["lag_bucket_used"],
                 "lag_sample_size": tee_est["lag_sample_size"],
@@ -603,6 +678,9 @@ def normalize_event_records(
                     "hole_length": hole_length,
                     "hole_score": hole_score,
                     "hole_to_par": (hole_score - hole_par) if hole_par is not None else None,
+                    "tee_time_join_ts": tee_join["tee_time_join_ts"],
+                    "tee_time_join_method": tee_join["tee_time_join_method"],
+                    "tee_time_join_confidence": tee_join["tee_time_join_confidence"],
                     "tee_time_raw": tee_time_raw,
                     "tee_time_est_ts": tee_est["tee_time_est_ts"],
                     "tee_time_est_method": tee_est["tee_time_est_method"],
