@@ -89,6 +89,29 @@ Current fixed policy:
 - `round_duration_est_minutes = 240` (4 hours) for all rows.
 - Round duration is not inferred from `scorecard_updated_at_ts`.
 
+## Weather Join Tee Timestamp Contract
+Silver stores a dedicated weather-join tee timestamp:
+- `tee_time_join_ts`
+- `tee_time_join_method`
+- `tee_time_join_confidence`
+
+Behavior (local time, no timezone conversion in Silver):
+1. `tee_time_raw` + `round_date_interp` available:
+   - `tee_time_join_ts = round_date_interp + tee_time_raw`
+   - method: `round_date_interp_plus_raw_tee`
+2. `tee_time_raw` missing, score timestamp available:
+   - `tee_time_join_ts = tee_time_est_ts`
+   - method: `fallback_score_based`
+3. both `tee_time_raw` and score timestamp missing:
+   - `tee_time_join_ts = round_date_interp + 12:00:00`
+   - method: `round_date_interp_noon_fallback`
+4. `round_date_interp` missing:
+   - `tee_time_join_ts = event_start_date + 12:00:00`
+   - method: `event_start_noon_fallback`
+5. no viable inputs:
+   - blank timestamp
+   - method: `missing_inputs`
+
 ## Hole Time Estimation Contract
 `player_holes` includes:
 - `hole_start_est_ts`
@@ -158,6 +181,9 @@ One row per player per round per event.
 | tee_time_est_ts | STRING | no | Estimated tee timestamp (local) |
 | tee_time_est_method | STRING | no | Method used to estimate tee time |
 | tee_time_est_confidence | DOUBLE | no | Confidence score for tee estimate |
+| tee_time_join_ts | STRING | no | Local timestamp used for weather joins |
+| tee_time_join_method | STRING | no | Method used to derive `tee_time_join_ts` |
+| tee_time_join_confidence | DOUBLE | no | Confidence score for weather-join tee timestamp |
 | lag_minutes_used | INT | no | Lag minutes used in tee estimation |
 | lag_bucket_used | STRING | no | Lag source bucket (`raw`, `global`, `none`) |
 | lag_sample_size | INT | no | Sample size for lag bucket (nullable) |
@@ -238,6 +264,9 @@ One row per player per hole per round per event.
 | tee_time_est_ts | STRING | no | Estimated tee timestamp (local) |
 | tee_time_est_method | STRING | no | Method used to estimate tee time |
 | tee_time_est_confidence | DOUBLE | no | Confidence score for tee estimate |
+| tee_time_join_ts | STRING | no | Local timestamp used for weather joins |
+| tee_time_join_method | STRING | no | Method used to derive `tee_time_join_ts` |
+| tee_time_join_confidence | DOUBLE | no | Confidence score for weather-join tee timestamp |
 | lag_minutes_used | INT | no | Lag minutes used in tee estimation |
 | lag_bucket_used | STRING | no | Lag source bucket (`raw`, `global`, `none`) |
 | round_duration_est_minutes | INT | no | Estimated round duration (fixed at 240) |

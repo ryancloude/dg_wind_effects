@@ -41,6 +41,7 @@ This document explains how `silver_pdga_live_results` builds normalized Silver o
     - PDGA -> ResultID -> NAMEHASH
   - Computes round-date interpolation (`round_date_interp*`)
   - Computes tee-time estimation fields (`tee_time_est*`, lag fields)
+  - Computes weather-join tee timestamp (`tee_time_join_*`)
   - Uses fixed 4-hour round duration (`round_duration_est_minutes=240`)
   - Computes estimated hole windows (`hole_start_est_ts`, `hole_end_est_ts`)
   - Computes row-level deterministic hash (`row_hash_sha256`)
@@ -146,6 +147,21 @@ Methods:
 
 Current policy:
 - `round_duration_est_minutes` is fixed to `240` for all rows.
+
+### Weather-join tee timestamp
+`normalize.py` computes:
+- `tee_time_join_ts`
+- `tee_time_join_method`
+- `tee_time_join_confidence`
+
+Priority:
+1. `round_date_interp_plus_raw_tee`
+2. `fallback_score_based`
+3. `round_date_interp_noon_fallback`
+4. `event_start_noon_fallback`
+5. `missing_inputs`
+
+All values are local-time strings; Silver does not apply timezone conversion.
 
 ### Hole-time estimation
 `normalize.py` computes:
