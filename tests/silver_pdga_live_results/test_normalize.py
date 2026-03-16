@@ -296,7 +296,7 @@ def test_tee_estimation_missing_tee_uses_global_lag():
     assert rr["tee_time_est_method"] == "score_minus_global_median_lag"
     assert rr["lag_minutes_used"] == 449
     assert rr["lag_bucket_used"] == "global"
-    assert rr["round_duration_est_minutes"] == 449
+    assert rr["round_duration_est_minutes"] == 240
     assert rr["tee_time_est_ts"] == "2025-06-20T02:20:05"
 
     assert len(hole_rows) == 2

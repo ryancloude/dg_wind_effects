@@ -7,7 +7,7 @@
   - `pk` (partition key)
   - `sk` (sort key)
 
-## Existing Bronze Items
+## Bronze Items
 
 ### 1) Event Metadata Item
 Key:
@@ -82,9 +82,102 @@ Typical attributes:
 - `unchanged`
 - `failed`
 
-## Silver Items (Added by Silver Layer)
+### 4) Weather Observation State Item (Per Event/Round/Provider/Source)
+Key:
+- `pk = EVENT#<event_id>`
+- `sk = WEATHER_OBS#ROUND#<round_number>#PROV#<provider>#SRC#<source_id>`
 
-### 4) Silver Event Checkpoint
+Typical attributes:
+- `event_id`
+- `round_number`
+- `provider`
+- `source_id`
+- `source_url`
+- `request_fingerprint`
+- `tee_time_source_fingerprint`
+- `fetch_status` (`success` or `unchanged`)
+- `content_sha256`
+- `latest_s3_json_key`
+- `latest_s3_meta_key`
+- `first_seen_at`
+- `last_fetched_at`
+- `last_run_id`
+
+### 5) Weather Event Summary
+Key:
+- `pk = EVENT#<event_id>`
+- `sk = WEATHER_OBS#SUMMARY`
+
+Typical attributes:
+- `pipeline = ingest_weather_observations`
+- `last_run_id`
+- `updated_at`
+- `last_silver_checkpoint_updated_at`
+- `attempted_round_tasks`
+- `processed_round_tasks`
+- `changed_round_tasks`
+- `unchanged_round_tasks`
+- `failed_round_tasks`
+- `daylight_hours_total`
+
+### 6) Weather Geocode Cache Item
+Key:
+- `pk = GEO#QUERY#<query_fingerprint>`
+- `sk = WEATHER_GEO#CACHE`
+
+Typical attributes:
+- `query_fingerprint`
+- `query_text`
+- `latitude`
+- `longitude`
+- `source_name`
+- `source_admin1`
+- `source_country`
+- `source_country_code`
+- `updated_at`
+- `last_run_id`
+
+### 7) Event Geocode Resolution Item
+Key:
+- `pk = EVENT#<event_id>`
+- `sk = WEATHER_GEO#RESOLVED`
+
+Typical attributes:
+- `event_id`
+- `query_fingerprint`
+- `query_text`
+- `latitude`
+- `longitude`
+- `resolution_source` (for example `open_meteo_geocoding`)
+- `first_seen_at`
+- `updated_at`
+- `last_run_id`
+
+### 8) Weather Bronze Run Summary
+Key:
+- `pk = RUN#<run_id>`
+- `sk = WEATHER_OBS#SUMMARY`
+
+Typical attributes:
+- `run_id`
+- `created_at`
+- `attempted_events`
+- `processed_events`
+- `skipped_incremental_events`
+- `failed_events`
+- `attempted_round_tasks`
+- `processed_round_tasks`
+- `changed_round_tasks`
+- `unchanged_round_tasks`
+- `failed_round_tasks`
+- `daylight_hours_total`
+- `point_from_metadata`
+- `point_from_cache`
+- `point_from_geocode_api`
+
+## Silver Items
+
+### 9) Silver Event Checkpoint
 Key:
 - `pk = PIPELINE#SILVER_LIVE_RESULTS`
 - `sk = EVENT#<event_id>`
@@ -116,7 +209,7 @@ Common dq_failed attributes:
 Common failed attributes:
 - `error_message`
 
-### 5) Silver Run Summary
+### 10) Silver Run Summary
 Key:
 - `pk = RUN#<run_id>`
 - `sk = SILVER_LIVE_RESULTS#SUMMARY`
