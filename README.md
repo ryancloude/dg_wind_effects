@@ -1,201 +1,155 @@
 ```md
 # DG Wind Effects (`dg_wind_effects`)
 
-Production-style AWS data pipeline for disc golf analytics and wind-impact modeling.
+## Project End Goal
+Build an AWS-native, production-style data platform that quantifies disc golf wind impact on scoring by:
+- ingesting PDGA event/live scoring data and weather data on schedules and backfills,
+- storing replayable Bronze raw data in S3,
+- producing normalized Silver datasets and analytics-ready Gold features,
+- aligning weather with round/hole timing,
+- estimating “strokes added by wind” by course/layout/division/conditions.
 
-## Current status
+## Current Status
 
 Implemented:
 - Bronze ingestion:
   - `ingest_pdga_event_pages`
   - `ingest_pdga_live_results`
+  - `ingest_weather_observations` (Open-Meteo archive + geocode cache)
 - Silver normalization:
   - `silver_pdga_live_results`
-  - outputs `player_rounds` and `player_holes` parquet tables
+  - outputs `player_rounds` and `player_holes` parquet
+- Checkpointing/state:
+  - DynamoDB state and run summaries for event pages, live results, silver live results, and weather ingestion
+- Containerized runners:
+  - Event pages, live results, silver live results, weather observations
 
-Planned:
-- Gold features and wind-effect modeling outputs
+Left to build:
+- Silver weather normalization layer (`silver_weather_observations`)
+- Join-ready weather-to-round/hole outputs in Silver
+- Gold fact/dim/feature models for wind effect analysis
+- Baseline expected scoring model + wind impact estimation logic
+- Final analytics outputs (notebook/dashboard + publication-ready summary tables)
 
-## Repository structure
+---
 
-```text
-dg_wind_effects/
-  ingest_pdga_event_pages/
-  ingest_pdga_live_results/
-  silver_pdga_live_results/
-  tests/
-  docs/
-  Dockerfile.event_pages
-  Dockerfile.live_results
-  Dockerfile.silver_live_results
-  pyproject.toml
-  requirements.lock
-```
+## Current Data Flow
 
-## Environment variables
+### 1) Bronze Event Metadata (`ingest_pdga_event_pages`)
+Purpose:
+- Discover and track PDGA event-level metadata and structure.
 
-Required:
-- `PDGA_S3_BUCKET`
-- `PDGA_DDB_TABLE`
+Input:
+- PDGA event HTML pages.
 
-Optional:
-- `AWS_REGION`
-- `PDGA_DDB_STATUS_END_DATE_GSI` (default `gsi_status_end_date`)
+Output:
+- S3 raw HTML + sidecar metadata.
+- DynamoDB `EVENT#<id>/METADATA` items with event dates, location fields (`city/state/country`), division/round structure, parser hashes/status.
 
-Example `.env`:
-
-```dotenv
-PDGA_S3_BUCKET=my-pdga-bucket
-PDGA_DDB_TABLE=pdga-event-index
-AWS_REGION=us-east-2
-PDGA_DDB_STATUS_END_DATE_GSI=gsi_status_end_date
-```
-
-## Local setup (PowerShell)
-
+Common commands:
 ```powershell
-cd C:\Users\ryanc\dg_wind_effects
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
-pip install -r .\requirements.lock
+python -m ingest_pdga_event_pages.runner --incremental
+python -m ingest_pdga_event_pages.runner --ids 90008,90009
+python -m ingest_pdga_event_pages.runner --range 90000-90100
 ```
 
-## Bronze runners
+---
 
-Event pages:
+### 2) Bronze Live Results (`ingest_pdga_live_results`)
+Purpose:
+- Pull per-event/per-division/per-round live scoring payloads.
+
+Input:
+- `METADATA` records (`division_rounds`) from DynamoDB.
+
+Output:
+- S3 raw live-results JSON + sidecar metadata.
+- DynamoDB per-round state items (`LIVE_RESULTS#DIV#...#ROUND#...`).
+- Run summary item (`RUN#<run_id>/LIVE_RESULTS#SUMMARY`).
+- Event marker `live_results_ingested=true` when successful.
+
+Common commands:
+```powershell
+python -m ingest_pdga_live_results.runner --historical-backfill
+python -m ingest_pdga_live_results.runner --event-ids 90008,90009
+python -m ingest_pdga_live_results.runner --historical-backfill --dry-run
+```
+
+---
+
+### 3) Silver Live Results (`silver_pdga_live_results`)
+Purpose:
+- Normalize Bronze live-results data into stable analysis tables.
+
+Input:
+- Bronze live-results S3 payloads + event metadata/state.
+
+Output:
+- `silver/pdga/live_results/player_rounds/.../player_rounds.parquet`
+- `silver/pdga/live_results/player_holes/.../player_holes.parquet`
+- Quarantine reports for DQ failures.
+- DynamoDB Silver checkpoints (`PIPELINE#SILVER_LIVE_RESULTS`) + run summary.
+- Includes timing fields like `round_date_interp` and `tee_time_join_ts` used by weather ingestion.
+
+Common commands:
+```powershell
+python -m silver_pdga_live_results.runner --run-mode pending_only --progress-every 25
+python -m silver_pdga_live_results.runner --run-mode full_check --force-events
+python -m silver_pdga_live_results.runner --event-ids 90008,90009 --force-events
+```
+
+---
+
+### 4) Bronze Weather Observations (`ingest_weather_observations`)
+Purpose:
+- Pull historical weather observations aligned to event timing/location.
+
+Input:
+- Silver live-results checkpoint + `player_rounds` parquet (`tee_time_join_ts`).
+- Event location fields (`city/state/country`) and/or coordinates.
+
+Processing:
+- Resolve coordinates by priority:
+  1. direct metadata lat/lon
+  2. cached geocode in DynamoDB
+  3. Open-Meteo geocoding fallback, then cache
+- Build round-level weather windows from tee-time-derived local dates.
+- Fetch Open-Meteo archive weather payloads.
+- Track idempotency via request/content/timing fingerprints.
+
+Output:
+- S3 raw weather JSON + sidecar metadata.
+- DynamoDB weather round state (`WEATHER_OBS#ROUND#...`), weather event summary (`WEATHER_OBS#SUMMARY`), geocode cache, and weather run summary.
+
+Common commands:
+```powershell
+python -m ingest_weather_observations.runner --incremental --progress-every 25
+python -m ingest_weather_observations.runner --event-ids 90008,90009 --dry-run
+python -m ingest_weather_observations.runner --historical-backfill --progress-every 25
+```
+
+---
+
+## Typical End-to-End Run Sequence (Current)
 
 ```powershell
 python -m ingest_pdga_event_pages.runner --incremental
-python -m ingest_pdga_event_pages.runner --ids 100001,100002
-python -m ingest_pdga_event_pages.runner --range 100000-100050
-python -m ingest_pdga_event_pages.runner --backfill-start-id 90000
-```
-
-Live results:
-
-```powershell
 python -m ingest_pdga_live_results.runner --historical-backfill
-python -m ingest_pdga_live_results.runner --event-ids 92608,92612
-python -m ingest_pdga_live_results.runner --historical-backfill --dry-run
-python -m ingest_pdga_live_results.backfill_live_results_ingested_flag
-```
-
-## Silver runner (`silver_pdga_live_results`)
-
-### What Silver does
-- Selects finalized events with `live_results_ingested=true`
-- Resolves Bronze round JSON payloads per event/division/round
-- Normalizes to:
-  - `player_rounds` (player-round grain)
-  - `player_holes` (player-hole grain)
-- Dedups deterministically by logical keys
-- Enforces DQ checks and writes quarantine reports on DQ failure
-- Writes event-level deterministic parquet outputs
-- Tracks event checkpoints + run summaries in DynamoDB
-- Computes deterministic `round_date_interp` fields for both tables
-
-### Incremental selection and reruns
-`--run-mode pending_only` (default):
-- includes events with missing checkpoint
-- includes events with `failed`
-- excludes `success` with fingerprint
-- excludes `dq_failed` by default
-- include `dq_failed` explicitly with `--include-dq-failed-in-pending`
-
-`--run-mode full_check`:
-- evaluates all candidate events
-
-`--force-events`:
-- disables unchanged-fingerprint skip for selected events
-
-### Silver run examples
-
-Dry run:
-
-```powershell
-python -m silver_pdga_live_results.runner --dry-run --log-level INFO
-```
-
-Default incremental run:
-
-```powershell
 python -m silver_pdga_live_results.runner --run-mode pending_only --progress-every 25
+python -m ingest_weather_observations.runner --incremental --progress-every 25
 ```
 
-Retry including prior DQ failures:
-
-```powershell
-python -m silver_pdga_live_results.runner --run-mode pending_only --include-dq-failed-in-pending --progress-every 25
-```
-
-Full reprocess (historical Silver re-backfill):
-
-```powershell
-python -m silver_pdga_live_results.runner --run-mode full_check --force-events --progress-every 25 --log-level INFO
-```
-
-Specific events:
-
-```powershell
-python -m silver_pdga_live_results.runner --event-ids 90008,90009 --force-events --log-level INFO
-```
-
-Console entrypoint equivalent:
-
-```powershell
-plan-silver-live-results --run-mode full_check --force-events --progress-every 25
-```
-
-## Docker usage
-
-Build:
-
-```powershell
-docker build -f Dockerfile.event_pages -t dg_event_pages:dev .
-docker build -f Dockerfile.live_results -t dg_live_results:dev .
-docker build -f Dockerfile.silver_live_results -t dg_silver_live_results:dev .
-```
-
-Run:
-
-```powershell
-docker run --rm --env-file .env dg_event_pages:dev --incremental
-docker run --rm --env-file .env dg_live_results:dev --historical-backfill
-docker run --rm --env-file .env dg_silver_live_results:dev --run-mode pending_only --progress-every 25
-```
-
-## Storage contracts
-
-Bronze S3:
-
-```text
-bronze/pdga/event_page/event_id=<event_id>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.html.gz
-bronze/pdga/event_page/event_id=<event_id>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.meta.json
-bronze/pdga/live_results/event_id=<event_id>/division=<division>/round=<round>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.json
-bronze/pdga/live_results/event_id=<event_id>/division=<division>/round=<round>/fetch_date=<YYYY-MM-DD>/fetch_ts=<UTC>.meta.json
-```
-
-Silver S3:
-
-```text
-silver/pdga/live_results/player_rounds/event_year=<YYYY>/tourn_id=<event_id>/player_rounds.parquet
-silver/pdga/live_results/player_holes/event_year=<YYYY>/tourn_id=<event_id>/player_holes.parquet
-silver/pdga/live_results/quarantine/event_id=<event_id>/run_id=<run_id>/dq_errors.json
-```
+---
 
 ## Testing
 
 All tests:
-
 ```powershell
 python -m pytest -v
 ```
-## Documentation index
-- `docs/silver_live_results_schema.md`
-- `docs/silver_live_results_code_walkthrough.md`
-- `docs/dynamodb_data_model.md`
-- `docs/ingest_pdga_event_pages_code_walkthrough.md`
-- `docs/ingest_pdga_live_results_code_walkthrough.md`
+
+Weather ingestion tests:
+```powershell
+python -m pytest tests/ingest_weather_observations -v
+```
 ```
