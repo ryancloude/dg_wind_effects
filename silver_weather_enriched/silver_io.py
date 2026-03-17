@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from io import BytesIO
+from typing import Any
+
+import boto3
+import pyarrow.parquet as pq
+
+from silver_weather_enriched.join import compute_enriched_event_fingerprint
+from silver_weather_enriched.models import JOIN_POLICY_VERSION
+
+
+def load_parquet_rows(*, bucket: str, key: str, s3_client=None) -> list[dict[str, Any]]:
+    s3 = s3_client or boto3.client("s3")
+    body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
+    table = pq.read_table(BytesIO(body))
+    return table.to_pylist()
+
+
+def load_event_input_tables(
+    *,
+    bucket: str,
+    round_s3_key: str,
+    hole_s3_key: str,
+    weather_s3_key: str,
+    s3_client=None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    round_rows = load_parquet_rows(bucket=bucket, key=round_s3_key, s3_client=s3_client)
+    hole_rows = load_parquet_rows(bucket=bucket, key=hole_s3_key, s3_client=s3_client)
+    weather_rows = load_parquet_rows(bucket=bucket, key=weather_s3_key, s3_client=s3_client)
+    return round_rows, hole_rows, weather_rows
+
+
+def compute_enriched_source_fingerprint(
+    *,
+    round_rows: list[dict[str, Any]],
+    hole_rows: list[dict[str, Any]],
+    weather_rows: list[dict[str, Any]],
+) -> str:
+    return compute_enriched_event_fingerprint(
+        round_rows=round_rows,
+        hole_rows=hole_rows,
+        weather_rows=weather_rows,
+        join_policy_version=JOIN_POLICY_VERSION,
+    )

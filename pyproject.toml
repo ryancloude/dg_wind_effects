@@ -28,6 +28,7 @@ ingest-pdga-live-results = "ingest_pdga_live_results.runner:main"
 ingest-weather-observations = "ingest_weather_observations.runner:main"
 plan-silver-live-results = "silver_pdga_live_results.runner:main"
 plan-silver-weather-observations = "silver_weather_observations.runner:main"
+plan-silver-weather-enriched = "silver_weather_enriched.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -37,6 +38,7 @@ include = [
   "ingest_weather_observations*",
   "silver_pdga_live_results*",
   "silver_weather_observations*",
+  "silver_weather_enriched*",
 ]
 
 [tool.pytest.ini_options]
