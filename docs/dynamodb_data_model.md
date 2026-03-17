@@ -226,6 +226,51 @@ Typical attributes:
 - `round_rows_written`
 - `hole_rows_written`
 
+### 11) Silver Weather Event Checkpoint
+Key:
+- `pk = PIPELINE#SILVER_WEATHER_OBSERVATIONS`
+- `sk = EVENT#<event_id>`
+
+Core attributes:
+- `event_id`
+- `pipeline = silver_weather_observations`
+- `status`:
+  - `success`
+  - `dq_failed`
+  - `failed`
+- `event_source_fingerprint`
+- `last_run_id`
+- `updated_at`
+
+Common success attributes:
+- `event_year`
+- `observation_rows`
+- `observations_s3_key`
+
+Common dq_failed attributes:
+- `event_year`
+- `error_count`
+- `errors` (truncated list)
+- `quarantine_key`
+
+Common failed attributes:
+- `error_message`
+
+### 12) Silver Weather Run Summary
+Key:
+- `pk = RUN#<run_id>`
+- `sk = SILVER_WEATHER_OBSERVATIONS#SUMMARY`
+
+Typical attributes:
+- `run_id`
+- `created_at`
+- `attempted_events`
+- `processed_events`
+- `skipped_unchanged_events`
+- `failed_events`
+- `dq_failed_events`
+- `observation_rows_written`
+
 ## GSI
 Existing Bronze/Silver selection path uses:
 - Name: `gsi_status_end_date`

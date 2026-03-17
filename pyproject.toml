@@ -25,16 +25,18 @@ dev = [
 [project.scripts]
 ingest-pdga-event-pages = "ingest_pdga_event_pages.runner:main"
 ingest-pdga-live-results = "ingest_pdga_live_results.runner:main"
-plan-silver-live-results = "silver_pdga_live_results.runner:main"
 ingest-weather-observations = "ingest_weather_observations.runner:main"
+plan-silver-live-results = "silver_pdga_live_results.runner:main"
+plan-silver-weather-observations = "silver_weather_observations.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
   "ingest_pdga_event_pages*",
   "ingest_pdga_live_results*",
-  "silver_pdga_live_results*",
   "ingest_weather_observations*",
+  "silver_pdga_live_results*",
+  "silver_weather_observations*",
 ]
 
 [tool.pytest.ini_options]

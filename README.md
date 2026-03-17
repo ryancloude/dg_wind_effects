@@ -15,10 +15,10 @@ Implemented:
 - Bronze ingestion:
   - `ingest_pdga_event_pages`
   - `ingest_pdga_live_results`
-  - `ingest_weather_observations` (Open-Meteo archive + geocode cache)
+  - `ingest_weather_observations`
 - Silver normalization:
   - `silver_pdga_live_results`
-  - outputs `player_rounds` and `player_holes` parquet
+  - `silver_weather_observations`
 - Checkpointing/state:
   - DynamoDB state and run summaries for event pages, live results, silver live results, and weather ingestion
 - Containerized runners:
@@ -127,7 +127,25 @@ python -m ingest_weather_observations.runner --incremental --progress-every 25
 python -m ingest_weather_observations.runner --event-ids 90008,90009 --dry-run
 python -m ingest_weather_observations.runner --historical-backfill --progress-every 25
 ```
+...
 
+## Silver runner (`silver_weather_observations`)
+
+What Silver weather does:
+- Selects weather-ingested event candidates from DynamoDB
+- Hydrates Bronze weather round sources from S3
+- Normalizes hourly observations into canonical rows
+- Enforces DQ rules and writes quarantine reports
+- Writes event-level parquet outputs
+- Tracks event checkpoints + run summaries in DynamoDB
+
+Run examples:
+
+```powershell
+python -m silver_weather_observations.runner --dry-run --log-level INFO
+python -m silver_weather_observations.runner --run-mode pending_only --progress-every 25
+python -m silver_weather_observations.runner --run-mode full_check --force-events --progress-every 25
+python -m silver_weather_observations.runner --event-ids 90008,90009 --force-events
 ---
 
 ## Typical End-to-End Run Sequence (Current)
