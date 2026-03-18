@@ -14,11 +14,11 @@ COPY requirements.lock pyproject.toml README.md ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.lock
 
-COPY silver_pdga_live_results/ silver_pdga_live_results/
-COPY docker/entrypoint_silver_live_results.sh /entrypoint_silver_live_results.sh
+COPY ingest_pdga_event_pages/ ingest_pdga_event_pages/
+COPY docker/entrypoints/entrypoint_event_pages.sh /entrypoint_event_pages.sh
 
-RUN chmod +x /entrypoint_silver_live_results.sh \
+RUN chmod +x /entrypoint_event_pages.sh \
     && pip install --no-cache-dir --no-deps .
 
-ENTRYPOINT ["/entrypoint_silver_live_results.sh"]
+ENTRYPOINT ["/entrypoint_event_pages.sh"]
 CMD ["--help"]

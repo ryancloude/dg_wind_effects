@@ -14,11 +14,11 @@ COPY requirements.lock pyproject.toml README.md ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.lock
 
-COPY silver_weather_enriched/ silver_weather_enriched/
-COPY docker/entrypoint_silver_weather_enriched.sh /entrypoint_silver_weather_enriched.sh
+COPY silver_pdga_live_results/ silver_pdga_live_results/
+COPY docker/entrypoints/entrypoint_silver_live_results.sh /entrypoint_silver_live_results.sh
 
-RUN chmod +x /entrypoint_silver_weather_enriched.sh \
+RUN chmod +x /entrypoint_silver_live_results.sh \
     && pip install --no-cache-dir --no-deps .
 
-ENTRYPOINT ["/entrypoint_silver_weather_enriched.sh"]
+ENTRYPOINT ["/entrypoint_silver_live_results.sh"]
 CMD ["--help"]

@@ -14,11 +14,11 @@ COPY requirements.lock pyproject.toml README.md ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.lock
 
-COPY ingest_pdga_event_pages/ ingest_pdga_event_pages/
-COPY docker/entrypoint_event_pages.sh /entrypoint_event_pages.sh
+COPY gold_wind_effects/ gold_wind_effects/
+COPY docker/entrypoints/entrypoint_gold_wind_effects.sh /entrypoint_gold_wind_effects.sh
 
-RUN chmod +x /entrypoint_event_pages.sh \
+RUN chmod +x /entrypoint_gold_wind_effects.sh \
     && pip install --no-cache-dir --no-deps .
 
-ENTRYPOINT ["/entrypoint_event_pages.sh"]
+ENTRYPOINT ["/entrypoint_gold_wind_effects.sh"]
 CMD ["--help"]

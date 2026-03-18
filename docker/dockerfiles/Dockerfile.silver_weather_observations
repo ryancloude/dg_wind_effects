@@ -14,11 +14,11 @@ COPY requirements.lock pyproject.toml README.md ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.lock
 
-COPY gold_wind_effects/ gold_wind_effects/
-COPY docker/entrypoint_gold_wind_effects.sh /entrypoint_gold_wind_effects.sh
+COPY silver_weather_observations/ silver_weather_observations/
+COPY docker/entrypoints/entrypoint_silver_weather_observations.sh /entrypoint_silver_weather_observations.sh
 
-RUN chmod +x /entrypoint_gold_wind_effects.sh \
+RUN chmod +x /entrypoint_silver_weather_observations.sh \
     && pip install --no-cache-dir --no-deps .
 
-ENTRYPOINT ["/entrypoint_gold_wind_effects.sh"]
+ENTRYPOINT ["/entrypoint_silver_weather_observations.sh"]
 CMD ["--help"]
