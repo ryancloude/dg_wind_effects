@@ -323,6 +323,45 @@ Typical attributes:
 - `missing_weather_round_rows`
 - `missing_weather_hole_rows`
 
+## Gold Wind Effects Checkpoint
+- `pk = PIPELINE#GOLD_WIND_EFFECTS`
+- `sk = EVENT#<event_id>`
+- `status` in `{success, failed, dq_failed}`
+- `event_source_fingerprint`
+- `event_year`
+- `round_rows`
+- `hole_rows`
+- `round_s3_key`
+- `hole_s3_key`
+- `last_run_id`
+- `updated_at`
+- Optional on DQ failure: `error_count`, `errors`, `quarantine_key`
+
+## Gold Wind Effects Run Summary
+- `pk = RUN#<run_id>`
+- `sk = GOLD_WIND_EFFECTS#SUMMARY`
+- Run counters (`attempted_events`, `processed_events`, `skipped_unchanged_events`, `failed_events`, `dq_failed_events`, row counts)
+- `created_at`
+
+## Gold Wind Model Inputs Checkpoint
+- `pk = PIPELINE#GOLD_WIND_MODEL_INPUTS`
+- `sk = EVENT#<event_id>`
+- `status` in `{success, failed, dq_failed}`
+- `event_source_fingerprint`
+- `event_year`
+- `hole_rows`
+- `round_rows`
+- `hole_s3_key`
+- `round_s3_key`
+- `last_run_id`
+- `updated_at`
+- Optional on DQ failure: `error_count`, `errors`, `quarantine_key`
+
+## Gold Wind Model Inputs Run Summary
+- `pk = RUN#<run_id>`
+- `sk = GOLD_WIND_MODEL_INPUTS#SUMMARY`
+- Run counters (`attempted_events`, `processed_events`, `skipped_unchanged_events`, `failed_events`, `dq_failed_events`, row counts)
+- `created_at`
 
 ## GSI
 Existing Bronze/Silver selection path uses:
