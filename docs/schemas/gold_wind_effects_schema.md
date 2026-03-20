@@ -59,3 +59,15 @@ Each row carries source lineage inherited from Silver:
 - `source_json_key`
 - `source_content_sha256`
 - weather lineage columns (`wx_source_json_key`, etc.)
+
+Each row also inherits full player biography fields from Silver:
+- `player_name`
+- `first_name`
+- `last_name`
+- `short_name`
+- `profile_url`
+- `player_city`
+- `player_state_prov`
+- `player_country`
+- `player_full_location`
+- `player_rating`

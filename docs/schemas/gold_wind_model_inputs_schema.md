@@ -63,6 +63,19 @@ Examples (hole):
 - `feature_course_id`
 - `wind_speed_bucket`
 
+## Inherited Player Biography Fields
+`gold_wind_model_inputs` preserves all upstream columns from `gold_wind_effects`, including:
+- `player_name`
+- `first_name`
+- `last_name`
+- `short_name`
+- `profile_url`
+- `player_city`
+- `player_state_prov`
+- `player_country`
+- `player_full_location`
+- `player_rating`
+
 ## Incremental/Idempotent Contract
 - Source candidates come from successful `PIPELINE#GOLD_WIND_EFFECTS`.
 - Event fingerprint is computed from source Gold feature rows.

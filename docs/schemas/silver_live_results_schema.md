@@ -153,6 +153,7 @@ One row per player per round per event.
 | player_state_prov | STRING | no | Player state/province |
 | player_country | STRING | no | Player country |
 | player_full_location | STRING | no | Player full location text |
+| player_rating | INT | no | Player PDGA rating from live results `Rating` |
 | event_name | STRING | no | Event name |
 | event_status_text | STRING | no | Event status |
 | event_start_date | STRING | no | Event start date (`YYYY-MM-DD`) |
@@ -239,6 +240,15 @@ One row per player per hole per round per event.
 | round_id | BIGINT | no | Round ID |
 | division | STRING | yes | Division (non-key) |
 | player_name | STRING | yes | Display name |
+| first_name | STRING | no | First name |
+| last_name | STRING | no | Last name |
+| short_name | STRING | no | Short name |
+| profile_url | STRING | no | Player profile URL |
+| player_city | STRING | no | Player city |
+| player_state_prov | STRING | no | Player state/province |
+| player_country | STRING | no | Player country |
+| player_full_location | STRING | no | Player full location text |
+| player_rating | INT | no | Player PDGA rating from live results `Rating` |
 | event_location_raw | STRING | no | Event location raw text |
 | event_city | STRING | no | Event city |
 | event_state | STRING | no | Event state |
