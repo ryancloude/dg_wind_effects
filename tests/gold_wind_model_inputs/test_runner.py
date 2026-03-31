@@ -9,7 +9,7 @@ def _candidate():
         event_id=90008,
         event_year=2026,
         hole_s3_key="hole.parquet",
-        round_s3_key="round.parquet",
+        round_s3_key="unused.parquet",
     )
 
 
@@ -40,11 +40,8 @@ def test_main_pending_only_skips_success_with_same_fingerprint(monkeypatch):
     )
     monkeypatch.setattr(
         runner,
-        "load_event_input_tables",
-        lambda **kwargs: (
-            [{"tourn_id": 90008, "round_number": 1, "hole_number": 1, "player_key": "P1"}],
-            [{"tourn_id": 90008, "round_number": 1, "player_key": "P1"}],
-        ),
+        "load_hole_feature_rows",
+        lambda **kwargs: [{"tourn_id": 90008, "round_number": 1, "hole_number": 1, "player_key": "P1"}],
     )
     monkeypatch.setattr(runner, "compute_model_inputs_event_fingerprint", lambda **kwargs: "fp-1")
     monkeypatch.setattr(
@@ -79,18 +76,67 @@ def test_main_full_check_processes_success(monkeypatch):
     monkeypatch.setattr(runner, "load_model_inputs_event_candidates", lambda **kwargs: [_candidate()])
     monkeypatch.setattr(
         runner,
-        "load_event_input_tables",
-        lambda **kwargs: (
-            [{"tourn_id": 90008, "round_number": 1, "hole_number": 1, "player_key": "P1", "hole_score": 3, "hole_par": 3}],
-            [{"tourn_id": 90008, "round_number": 1, "player_key": "P1", "round_score": 57, "layout_par": 60}],
-        ),
+        "load_hole_feature_rows",
+        lambda **kwargs: [
+            {
+                "event_year": 2026,
+                "tourn_id": 90008,
+                "round_number": 1,
+                "hole_number": 1,
+                "player_key": "P1",
+                "actual_strokes": 3,
+                "strokes_over_par": 0,
+                "hole_length": 300.0,
+                "hole_par": 3,
+                "player_rating": 915,
+            }
+        ],
     )
     monkeypatch.setattr(runner, "compute_model_inputs_event_fingerprint", lambda **kwargs: "fp-new")
     monkeypatch.setattr(runner, "get_model_inputs_event_checkpoint", lambda **kwargs: None)
-    monkeypatch.setattr(runner, "build_hole_model_inputs", lambda rows, **kwargs: [dict(rows[0], row_hash_sha256="hole-hash", target_strokes_over_par=0, model_inputs_grain="hole", model_inputs_version="v1", weather_available_flag=True, event_year=2026)])
-    monkeypatch.setattr(runner, "build_round_model_inputs", lambda rows, **kwargs: [dict(rows[0], row_hash_sha256="round-hash", target_strokes_over_par=-3, model_inputs_grain="round", model_inputs_version="v1", weather_available_flag=True, event_year=2026)])
+    monkeypatch.setattr(
+        runner,
+        "build_round_model_inputs",
+        lambda rows, **kwargs: [
+            {
+                "event_year": 2026,
+                "tourn_id": 90008,
+                "round_number": 1,
+                "player_key": "P1",
+                "model_inputs_grain": "round",
+                "model_inputs_version": "v2",
+                "model_inputs_run_id": "run-1",
+                "model_inputs_processed_at_utc": "2026-03-31T12:00:00Z",
+                "row_hash_sha256": "round-hash",
+                "actual_round_strokes": 57,
+                "round_strokes_over_par": -3,
+                "weather_available_flag": True,
+                "hole_count": 18,
+                "round_total_hole_length": 9000.0,
+                "round_avg_hole_length": 500.0,
+                "round_total_par": 60,
+                "round_avg_hole_par": 3.33,
+                "round_length_over_par": 150.0,
+                "round_wind_speed_mps_mean": 4.2,
+                "round_wind_speed_mps_max": 5.0,
+                "round_wind_gust_mps_mean": 6.0,
+                "round_wind_gust_mps_max": 7.0,
+                "round_temp_c_mean": 18.0,
+                "round_precip_mm_sum": 0.0,
+                "round_precip_mm_mean": 0.0,
+                "round_pressure_hpa_mean": 1012.0,
+                "round_humidity_pct_mean": 60.0,
+                "round_wind_speed_bucket": "light",
+                "round_wind_gust_bucket": "mild",
+                "course_id": 101,
+                "layout_id": 201,
+                "division": "MA3",
+                "player_rating": 915.0,
+            }
+        ],
+    )
     monkeypatch.setattr(runner, "validate_model_inputs_quality", lambda **kwargs: [])
-    monkeypatch.setattr(runner, "overwrite_event_tables", lambda **kwargs: {"hole_key": "hk", "round_key": "rk"})
+    monkeypatch.setattr(runner, "overwrite_event_tables", lambda **kwargs: {"round_key": "rk"})
 
     checkpoint_calls = []
     run_summary_calls = []

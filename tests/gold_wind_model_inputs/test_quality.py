@@ -3,32 +3,10 @@ from gold_wind_model_inputs.quality import validate_model_inputs_quality
 
 def _hole_input():
     return {
-        "tourn_id": 90008,
-        "round_number": 1,
-        "hole_number": 1,
-        "player_key": "P1",
-    }
-
-
-def _hole_output():
-    return {
         "event_year": 2026,
         "tourn_id": 90008,
         "round_number": 1,
         "hole_number": 1,
-        "player_key": "P1",
-        "model_inputs_grain": "hole",
-        "model_inputs_version": "v1",
-        "target_strokes_over_par": 0,
-        "weather_available_flag": True,
-        "row_hash_sha256": "abc",
-    }
-
-
-def _round_input():
-    return {
-        "tourn_id": 90008,
-        "round_number": 1,
         "player_key": "P1",
     }
 
@@ -40,52 +18,63 @@ def _round_output():
         "round_number": 1,
         "player_key": "P1",
         "model_inputs_grain": "round",
-        "model_inputs_version": "v1",
-        "target_strokes_over_par": -3,
+        "model_inputs_version": "v2",
+        "model_inputs_run_id": "run-1",
+        "model_inputs_processed_at_utc": "2026-03-31T12:00:00Z",
+        "row_hash_sha256": "abc",
+        "actual_round_strokes": 57,
+        "round_strokes_over_par": -3,
         "weather_available_flag": True,
-        "row_hash_sha256": "def",
+        "hole_count": 18,
+        "round_total_hole_length": 9000.0,
+        "round_avg_hole_length": 500.0,
+        "round_total_par": 60,
+        "round_avg_hole_par": 3.33,
+        "round_length_over_par": 150.0,
+        "round_wind_speed_mps_mean": 4.2,
+        "round_wind_speed_mps_max": 6.0,
+        "round_wind_gust_mps_mean": 5.8,
+        "round_wind_gust_mps_max": 7.1,
+        "round_temp_c_mean": 18.0,
+        "round_precip_mm_sum": 0.1,
+        "round_precip_mm_mean": 0.01,
+        "round_pressure_hpa_mean": 1012.0,
+        "round_humidity_pct_mean": 61.0,
+        "round_wind_speed_bucket": "light",
+        "round_wind_gust_bucket": "mild",
+        "course_id": 101,
+        "layout_id": 201,
+        "division": "MA3",
+        "player_rating": 915.0,
     }
 
 
 def test_validate_model_inputs_quality_happy_path():
     errors = validate_model_inputs_quality(
         hole_input_rows=[_hole_input()],
-        hole_output_rows=[_hole_output()],
-        round_input_rows=[_round_input()],
         round_output_rows=[_round_output()],
     )
     assert errors == []
 
 
 def test_validate_model_inputs_quality_missing_required_column():
-    bad = _hole_output()
+    bad = _round_output()
     bad.pop("row_hash_sha256")
 
     errors = validate_model_inputs_quality(
         hole_input_rows=[_hole_input()],
-        hole_output_rows=[bad],
+        round_output_rows=[bad],
     )
     assert errors
-    assert any(e["rule"] in ("columns:hole_required", "not_null:row_hash_sha256:hole") for e in errors)
+    assert any(e["rule"] in ("columns:round_required", "not_null:row_hash_sha256:round") for e in errors)
 
 
-def test_validate_model_inputs_quality_duplicate_hole_pk():
-    inp = [_hole_input(), _hole_input()]
-    out = [_hole_output(), _hole_output()]
+def test_validate_model_inputs_quality_duplicate_round_pk():
+    inp = [_hole_input(), dict(_hole_input(), hole_number=2)]
+    out = [_round_output(), _round_output()]
 
     errors = validate_model_inputs_quality(
         hole_input_rows=inp,
-        hole_output_rows=out,
+        round_output_rows=out,
     )
-    assert any(e["rule"] == "uniqueness:hole_pk" for e in errors)
-
-
-def test_validate_model_inputs_quality_null_target():
-    bad = _hole_output()
-    bad["target_strokes_over_par"] = None
-
-    errors = validate_model_inputs_quality(
-        hole_input_rows=[_hole_input()],
-        hole_output_rows=[bad],
-    )
-    assert any(e["rule"] == "not_null:hole_target_strokes_over_par" for e in errors)
+    assert any(e["rule"] == "uniqueness:round_pk" for e in errors)

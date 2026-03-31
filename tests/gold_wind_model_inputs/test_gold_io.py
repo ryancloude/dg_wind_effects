@@ -17,7 +17,7 @@ class FakeS3:
         return {"Body": _Body(self.payloads[Key])}
 
 
-def test_load_event_input_tables_reads_hole_and_optional_round(monkeypatch):
+def test_load_hole_feature_rows_reads_hole_parquet(monkeypatch):
     import pyarrow as pa
     import pyarrow.parquet as pq
     from io import BytesIO
@@ -29,24 +29,28 @@ def test_load_event_input_tables_reads_hole_and_optional_round(monkeypatch):
         return b.getvalue()
 
     payloads = {
-        "hole.parquet": _to_bytes([{"tourn_id": 90008, "hole_number": 1}]),
-        "round.parquet": _to_bytes([{"tourn_id": 90008, "round_number": 1}]),
+        "hole.parquet": _to_bytes(
+            [
+                {"tourn_id": 90008, "round_number": 1, "hole_number": 1, "player_key": "P1"},
+                {"tourn_id": 90008, "round_number": 1, "hole_number": 2, "player_key": "P1"},
+            ]
+        )
     }
     fake_s3 = FakeS3(payloads)
 
-    holes, rounds = gio.load_event_input_tables(
+    holes = gio.load_hole_feature_rows(
         bucket="bucket",
         hole_s3_key="hole.parquet",
-        round_s3_key="round.parquet",
         s3_client=fake_s3,
     )
 
-    assert len(holes) == 1
-    assert len(rounds) == 1
+    assert len(holes) == 2
     assert holes[0]["tourn_id"] == 90008
+    assert holes[0]["hole_number"] == 1
+    assert holes[1]["hole_number"] == 2
 
 
-def test_load_event_input_tables_hole_only(monkeypatch):
+def test_load_parquet_rows_reads_generic_parquet(monkeypatch):
     import pyarrow as pa
     import pyarrow.parquet as pq
     from io import BytesIO
@@ -57,15 +61,22 @@ def test_load_event_input_tables_hole_only(monkeypatch):
         pq.write_table(t, b, compression="snappy")
         return b.getvalue()
 
-    payloads = {"hole.parquet": _to_bytes([{"tourn_id": 90008, "hole_number": 1}])}
+    payloads = {
+        "rows.parquet": _to_bytes(
+            [
+                {"tourn_id": 90008, "value": "a"},
+                {"tourn_id": 90009, "value": "b"},
+            ]
+        )
+    }
     fake_s3 = FakeS3(payloads)
 
-    holes, rounds = gio.load_event_input_tables(
+    rows = gio.load_parquet_rows(
         bucket="bucket",
-        hole_s3_key="hole.parquet",
-        round_s3_key=None,
+        key="rows.parquet",
         s3_client=fake_s3,
     )
 
-    assert len(holes) == 1
-    assert rounds == []
+    assert len(rows) == 2
+    assert rows[0]["value"] == "a"
+    assert rows[1]["tourn_id"] == 90009

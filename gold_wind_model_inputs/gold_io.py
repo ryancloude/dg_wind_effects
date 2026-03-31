@@ -14,15 +14,10 @@ def load_parquet_rows(*, bucket: str, key: str, s3_client=None) -> list[dict[str
     return table.to_pylist()
 
 
-def load_event_input_tables(
+def load_hole_feature_rows(
     *,
     bucket: str,
     hole_s3_key: str,
-    round_s3_key: str | None = None,
     s3_client=None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    hole_rows = load_parquet_rows(bucket=bucket, key=hole_s3_key, s3_client=s3_client)
-    round_rows: list[dict[str, Any]] = []
-    if round_s3_key:
-        round_rows = load_parquet_rows(bucket=bucket, key=round_s3_key, s3_client=s3_client)
-    return hole_rows, round_rows
+) -> list[dict[str, Any]]:
+    return load_parquet_rows(bucket=bucket, key=hole_s3_key, s3_client=s3_client)

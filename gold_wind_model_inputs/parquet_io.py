@@ -16,15 +16,6 @@ def _to_parquet_bytes(rows: list[dict[str, Any]]) -> bytes:
     return buf.getvalue()
 
 
-def build_hole_output_key(*, event_year: int, event_id: int) -> str:
-    return (
-        "gold/pdga/wind_effects/model_inputs_hole/"
-        f"event_year={int(event_year)}/"
-        f"tourn_id={int(event_id)}/"
-        "model_inputs_hole.parquet"
-    )
-
-
 def build_round_output_key(*, event_year: int, event_id: int) -> str:
     return (
         "gold/pdga/wind_effects/model_inputs_round/"
@@ -49,33 +40,20 @@ def overwrite_event_tables(
     bucket: str,
     event_year: int,
     event_id: int,
-    hole_rows: list[dict[str, Any]],
-    round_rows: list[dict[str, Any]] | None = None,
+    round_rows: list[dict[str, Any]],
     s3_client=None,
 ) -> dict[str, str]:
     s3 = s3_client or boto3.client("s3")
 
-    hole_key = build_hole_output_key(event_year=event_year, event_id=event_id)
+    round_key = build_round_output_key(event_year=event_year, event_id=event_id)
     s3.put_object(
         Bucket=bucket,
-        Key=hole_key,
-        Body=_to_parquet_bytes(hole_rows),
+        Key=round_key,
+        Body=_to_parquet_bytes(round_rows),
         ContentType="application/octet-stream",
     )
 
-    out = {"hole_key": hole_key}
-
-    if round_rows is not None:
-        round_key = build_round_output_key(event_year=event_year, event_id=event_id)
-        s3.put_object(
-            Bucket=bucket,
-            Key=round_key,
-            Body=_to_parquet_bytes(round_rows),
-            ContentType="application/octet-stream",
-        )
-        out["round_key"] = round_key
-
-    return out
+    return {"round_key": round_key}
 
 
 def put_quarantine_report(

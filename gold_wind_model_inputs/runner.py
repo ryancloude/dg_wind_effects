@@ -14,11 +14,10 @@ from gold_wind_model_inputs.dynamo_io import (
     put_model_inputs_event_checkpoint,
     put_model_inputs_run_summary,
 )
-from gold_wind_model_inputs.gold_io import load_event_input_tables
+from gold_wind_model_inputs.gold_io import load_hole_feature_rows
 from gold_wind_model_inputs.parquet_io import overwrite_event_tables, put_quarantine_report
 from gold_wind_model_inputs.quality import validate_model_inputs_quality
 from gold_wind_model_inputs.transform import (
-    build_hole_model_inputs,
     build_round_model_inputs,
     compute_model_inputs_event_fingerprint,
 )
@@ -33,7 +32,6 @@ class RunStats:
     skipped_unchanged_events: int = 0
     failed_events: int = 0
     dq_failed_events: int = 0
-    hole_rows_written: int = 0
     round_rows_written: int = 0
 
     def to_dict(self) -> dict[str, int]:
@@ -43,7 +41,6 @@ class RunStats:
             "skipped_unchanged_events": self.skipped_unchanged_events,
             "failed_events": self.failed_events,
             "dq_failed_events": self.dq_failed_events,
-            "hole_rows_written": self.hole_rows_written,
             "round_rows_written": self.round_rows_written,
         }
 
@@ -54,7 +51,7 @@ def make_run_id() -> str:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Build Gold wind model-input tables from Gold wind feature outputs.")
+    p = argparse.ArgumentParser(description="Build round-level Gold wind model-input tables from Gold hole feature outputs.")
     p.add_argument("--event-ids", help="Optional comma-separated event IDs")
     p.add_argument("--bucket", help="Override S3 bucket")
     p.add_argument("--ddb-table", help="Override DynamoDB table")
@@ -98,19 +95,18 @@ def _is_pending_event(event_id: int, checkpoints: dict[int, dict], *, include_dq
     return True
 
 
-def _event_year(candidate: ModelInputsEventCandidate, hole_rows: list[dict], round_rows: list[dict]) -> int:
+def _event_year(candidate: ModelInputsEventCandidate, hole_rows: list[dict]) -> int:
     if candidate.event_year > 0:
         return int(candidate.event_year)
 
-    for rows in (hole_rows, round_rows):
-        if rows:
-            val = rows[0].get("event_year")
-            try:
-                parsed = int(val)
-                if parsed > 0:
-                    return parsed
-            except (TypeError, ValueError):
-                pass
+    if hole_rows:
+        val = hole_rows[0].get("event_year")
+        try:
+            parsed = int(val)
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
     return 0
 
 
@@ -179,16 +175,12 @@ def main() -> int:
         event_id = candidate.event_id
 
         try:
-            hole_rows, round_rows = load_event_input_tables(
+            hole_rows = load_hole_feature_rows(
                 bucket=bucket,
                 hole_s3_key=candidate.hole_s3_key,
-                round_s3_key=candidate.round_s3_key,
             )
 
-            source_fp = compute_model_inputs_event_fingerprint(
-                hole_rows=hole_rows,
-                round_rows=round_rows,
-            )
+            source_fp = compute_model_inputs_event_fingerprint(hole_rows=hole_rows)
 
             checkpoint = get_model_inputs_event_checkpoint(
                 table_name=ddb_table,
@@ -210,21 +202,14 @@ def main() -> int:
                 continue
 
             processed_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-            hole_out = build_hole_model_inputs(
+            round_out = build_round_model_inputs(
                 hole_rows,
                 run_id=run_id,
                 processed_at_utc=processed_at,
             )
-            round_out = build_round_model_inputs(
-                round_rows,
-                run_id=run_id,
-                processed_at_utc=processed_at,
-            ) if round_rows else []
 
             dq_errors = validate_model_inputs_quality(
                 hole_input_rows=hole_rows,
-                hole_output_rows=hole_out,
-                round_input_rows=round_rows,
                 round_output_rows=round_out,
             )
 
@@ -232,7 +217,7 @@ def main() -> int:
                 stats.failed_events += 1
                 stats.dq_failed_events += 1
 
-                event_year = _event_year(candidate, hole_rows, round_rows)
+                event_year = _event_year(candidate, hole_rows)
                 quarantine_key = ""
                 if not args.dry_run:
                     quarantine_key = put_quarantine_report(
@@ -265,13 +250,12 @@ def main() -> int:
 
             keys = {}
             if not args.dry_run:
-                event_year = _event_year(candidate, hole_rows, round_rows)
+                event_year = _event_year(candidate, hole_rows)
                 keys = overwrite_event_tables(
                     bucket=bucket,
                     event_year=event_year,
                     event_id=event_id,
-                    hole_rows=hole_out,
-                    round_rows=round_out if round_out else None,
+                    round_rows=round_out,
                 )
                 put_model_inputs_event_checkpoint(
                     table_name=ddb_table,
@@ -282,15 +266,12 @@ def main() -> int:
                     aws_region=cfg.aws_region,
                     extra_attributes={
                         "event_year": event_year,
-                        "hole_rows": len(hole_out),
                         "round_rows": len(round_out),
-                        "hole_s3_key": keys.get("hole_key", ""),
                         "round_s3_key": keys.get("round_key", ""),
                     },
                 )
 
             stats.processed_events += 1
-            stats.hole_rows_written += len(hole_out)
             stats.round_rows_written += len(round_out)
 
             logger.info(
@@ -298,9 +279,7 @@ def main() -> int:
                 extra={
                     "event_id": event_id,
                     "run_id": run_id,
-                    "hole_rows": len(hole_out),
                     "round_rows": len(round_out),
-                    "hole_key": keys.get("hole_key", ""),
                     "round_key": keys.get("round_key", ""),
                 },
             )
