@@ -30,3 +30,5 @@ build/
 
 AGENTS.md
 *.vscode
+wind_impact_analysis/notebook_exports/
+wind_impact_analysis/catboost_info/
