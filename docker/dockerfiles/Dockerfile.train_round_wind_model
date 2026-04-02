@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY train_round_wind_model/ train_round_wind_model/
+COPY docker/entrypoints/entrypoint_train_round_wind_model.sh /entrypoint_train_round_wind_model.sh
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir .
+
+RUN chmod +x /entrypoint_train_round_wind_model.sh
+
+ENTRYPOINT ["/entrypoint_train_round_wind_model.sh"]
+CMD ["--help"]

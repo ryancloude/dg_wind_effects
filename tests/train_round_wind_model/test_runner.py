@@ -1,0 +1,122 @@
+from types import SimpleNamespace
+
+import pandas as pd
+
+import train_round_wind_model.runner as runner
+from train_round_wind_model.training import TrainingResult
+
+
+class _FakeModel:
+    pass
+
+
+def test_main_skips_when_checkpoint_exists(monkeypatch):
+    args = SimpleNamespace(
+        event_ids=None,
+        bucket=None,
+        ddb_table=None,
+        dry_run=True,
+        force_train=False,
+        log_level="INFO",
+    )
+
+    monkeypatch.setattr(runner, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        runner,
+        "load_config",
+        lambda: SimpleNamespace(s3_bucket="bucket", ddb_table="table", aws_region="us-east-1"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_model_input_round_dataframe",
+        lambda **kwargs: (pd.DataFrame([{"row_hash_sha256": "a"}]), [{"key": "k1", "etag": "e1", "size": 1, "last_modified": "x"}]),
+    )
+    monkeypatch.setattr(runner, "compute_dataset_fingerprint", lambda objects: "dataset-fp")
+    monkeypatch.setattr(runner, "compute_training_request_fingerprint", lambda **kwargs: "train-fp")
+    monkeypatch.setattr(
+        runner,
+        "get_training_checkpoint",
+        lambda **kwargs: {"status": "success", "training_request_fingerprint": "train-fp"},
+    )
+
+    exit_code = runner.main()
+    assert exit_code == 0
+
+
+def test_main_trains_and_writes(monkeypatch):
+    args = SimpleNamespace(
+        event_ids=None,
+        bucket=None,
+        ddb_table=None,
+        dry_run=False,
+        force_train=False,
+        log_level="INFO",
+    )
+
+    monkeypatch.setattr(runner, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        runner,
+        "load_config",
+        lambda: SimpleNamespace(s3_bucket="bucket", ddb_table="table", aws_region="us-east-1"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_model_input_round_dataframe",
+        lambda **kwargs: (
+            pd.DataFrame([{"row_hash_sha256": "a"}, {"row_hash_sha256": "b"}]),
+            [
+                {"key": "k1", "etag": "e1", "size": 1, "last_modified": "x"},
+                {"key": "k2", "etag": "e2", "size": 1, "last_modified": "y"},
+            ],
+        ),
+    )
+    monkeypatch.setattr(runner, "compute_dataset_fingerprint", lambda objects: "dataset-fp")
+    monkeypatch.setattr(runner, "compute_training_request_fingerprint", lambda **kwargs: "train-fp")
+    monkeypatch.setattr(runner, "get_training_checkpoint", lambda **kwargs: None)
+
+    fake_result = TrainingResult(
+        model=_FakeModel(),
+        metrics={
+            "mae": 1.2,
+            "rmse": 1.5,
+            "r2": 0.4,
+            "best_iteration": 123,
+            "input_rows": 100,
+            "rows_after_weather_filter": 90,
+            "rows_after_numeric_not_null_filter": 80,
+            "train_rows": 50,
+            "valid_rows": 15,
+            "test_rows": 15,
+        },
+        training_manifest={
+            "model_name": "round_one_stage_catboost",
+            "model_version": "v1",
+            "feature_cols": ["player_rating"],
+            "categorical_features": ["course_id"],
+        },
+        feature_importance_rows=[{"feature": "player_rating", "importance": 10.0}],
+    )
+    monkeypatch.setattr(runner, "train_round_model", lambda **kwargs: fake_result)
+    monkeypatch.setattr(
+        runner,
+        "write_training_artifacts",
+        lambda **kwargs: {
+            "artifact_prefix": "artifacts/prefix/",
+            "model_key": "model.cbm",
+            "metrics_key": "metrics.json",
+            "manifest_key": "manifest.json",
+        },
+    )
+
+    checkpoint_calls = []
+    run_summary_calls = []
+
+    monkeypatch.setattr(runner, "put_training_checkpoint", lambda **kwargs: checkpoint_calls.append(kwargs))
+    monkeypatch.setattr(runner, "put_training_run_summary", lambda **kwargs: run_summary_calls.append(kwargs))
+
+    exit_code = runner.main()
+
+    assert exit_code == 0
+    assert len(checkpoint_calls) == 1
+    assert checkpoint_calls[0]["status"] == "success"
+    assert len(run_summary_calls) == 1

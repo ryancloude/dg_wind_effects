@@ -3,7 +3,7 @@
 
 An AWS-native, production-style data platform for estimating how weather, especially wind, affects disc golf scoring.
 
-The project ingests PDGA event and live scoring data, aligns historical weather observations to round and hole timing, builds Bronze/Silver/Gold datasets in S3, and prepares a canonical round-level modeling dataset for a one-stage CatBoost wind-impact model.
+The project ingests PDGA event and live scoring data, aligns historical weather observations to round and hole timing, builds Bronze/Silver/Gold datasets in S3, prepares a canonical round-level modeling dataset, and trains a production one-stage CatBoost model for wind-impact analysis.
 
 ## Project Goal
 
@@ -19,7 +19,7 @@ The intended end state is:
 - normalized and validated Silver datasets
 - analytics-ready Gold datasets
 - productionized model-input preparation
-- model training and inference built on versioned feature contracts
+- productionized model training and inference
 - notebook and reporting outputs that are understandable and reproducible
 
 ---
@@ -42,22 +42,25 @@ Gold processing:
 - `gold_wind_effects`
 - `gold_wind_model_inputs`
 
+Modeling:
+- `train_round_wind_model`
+
 Analysis and prototyping:
 - `wind_impact_analysis`
 
-### Current modeling direction
+### Current production modeling direction
 
 The current production modeling direction is:
 
 - one-stage CatBoost
 - round-level grain
 - model-ready inputs produced by `gold_wind_model_inputs`
-- round outputs built from aggregated Gold hole rows
+- model trained by `train_round_wind_model`
+- future scoring step to generate predictions and wind-effect outputs
 
 ### What is still in progress
 
 Planned or partially complete next steps:
-- productionized model training job for the round-level CatBoost model
 - productionized model inference/scoring job
 - scored output tables with:
   - predicted round strokes
@@ -79,6 +82,7 @@ dg_wind_effects/
 ├── silver_weather_enriched/
 ├── gold_wind_effects/
 ├── gold_wind_model_inputs/
+├── train_round_wind_model/
 ├── wind_impact_analysis/
 ├── docs/
 ├── docker/
@@ -112,6 +116,9 @@ dg_wind_effects/
 - `gold_wind_model_inputs`
   - produces the canonical round-level model-input dataset used by the production wind model
 
+- `train_round_wind_model`
+  - trains the production round-level one-stage CatBoost model and writes versioned model artifacts
+
 - `wind_impact_analysis`
   - notebook-based exploration, feature experiments, and model evaluation
 
@@ -119,7 +126,7 @@ dg_wind_effects/
 
 ## Pipeline Architecture
 
-The pipeline follows a Bronze / Silver / Gold pattern.
+The pipeline follows a Bronze / Silver / Gold / Modeling pattern.
 
 ### Bronze
 Raw, replayable source snapshots and state.
@@ -143,7 +150,14 @@ Analytics-ready, versioned outputs.
 
 Examples:
 - enriched round/hole scoring-weather facts
-- round-level model-input dataset for production modeling
+- canonical round-level model-input dataset
+
+### Modeling
+Versioned training and, later, scoring steps built on the Gold feature contracts.
+
+Examples:
+- round-level CatBoost training artifact bundle
+- future scored round outputs with wind-effect estimates
 
 ---
 
@@ -425,24 +439,88 @@ python -m gold_wind_model_inputs.runner --event-ids 90008,90009 --force-events
 
 ---
 
+### 9. Train Round Wind Model: `train_round_wind_model`
+
+Purpose:
+- Train the production round-level one-stage CatBoost wind model from the canonical round model-input dataset.
+
+Inputs:
+- `gold/pdga/wind_effects/model_inputs_round/...`
+
+Outputs:
+- versioned CatBoost model artifact bundle in S3
+- training manifest and metrics
+- feature importance export
+- one DynamoDB checkpoint per training request fingerprint
+- one training run summary per run
+
+Current production model:
+- one-stage CatBoost
+- round-level grain
+- target:
+  - `actual_round_strokes`
+- validation set used for early stopping
+- test set used for final metrics
+
+Artifact bundle includes:
+- `model.cbm`
+- `training_manifest.json`
+- `metrics.json`
+- `feature_columns.json`
+- `categorical_feature_columns.json`
+- `feature_importance.csv`
+
+Checkpoint behavior:
+- one canonical checkpoint per training request fingerprint
+- successful identical training requests are skipped unless `--force-train`
+
+Common commands:
+
+```powershell
+python -m train_round_wind_model.runner --dry-run --log-level INFO
+python -m train_round_wind_model.runner --log-level INFO
+python -m train_round_wind_model.runner --event-ids 90008,90009 --log-level INFO
+python -m train_round_wind_model.runner --force-train --log-level INFO
+```
+
+---
+
 ## Incremental and Idempotent Design
 
 A core design goal across the pipeline is safe reruns.
 
 Patterns used throughout:
-- deterministic event-level output keys in S3
-- event fingerprints to detect unchanged source data
-- event-level checkpoints in DynamoDB
+- deterministic event-level or request-level output identities
+- source fingerprints to detect unchanged inputs
+- checkpoints in DynamoDB
 - run summaries for observability
 - quarantine outputs for DQ failures
 
-For `gold_wind_model_inputs` specifically:
-- candidate events come from successful `gold_wind_effects`
-- event fingerprint is computed from source Gold hole rows plus policy version
-- unchanged successful events are skipped
-- reruns overwrite the same event output path rather than creating duplicates
+### Event-level incremental steps
+These steps are incremental at the event level:
+- `silver_pdga_live_results`
+- `silver_weather_observations`
+- `silver_weather_enriched`
+- `gold_wind_effects`
+- `gold_wind_model_inputs`
 
-This keeps the step incremental without requiring full-dataset rebuilds every run.
+For these steps:
+- unchanged event source data can be skipped
+- reruns overwrite deterministic event output paths
+- duplicate outputs are avoided
+
+### Training-step incremental behavior
+`train_round_wind_model` is incremental at the training-request level.
+
+It computes a training request fingerprint from:
+- source dataset fingerprint
+- model identity/version
+- feature contract
+- split settings
+- hyperparameters
+- optional event subset
+
+If the same request already succeeded, training is skipped unless forced.
 
 ---
 
@@ -454,11 +532,12 @@ Notebook-based exploration lives in:
 
 This is where feature experiments, model comparisons, and interpretation work happen.
 
-### Current preferred model
+### Current preferred production model
 The current preferred modeling direction is:
 - one-stage CatBoost
 - round-level grain
-- training data sourced from `gold_wind_model_inputs/model_inputs_round`
+- trained from `gold_wind_model_inputs/model_inputs_round`
+- artifactized by `train_round_wind_model`
 
 ### Why round level
 The round-level model gives a good balance of:
@@ -473,14 +552,13 @@ The round-level model gives a good balance of:
 
 ### Current production boundary
 At the moment:
-- data prep is moving into the pipeline
-- training/inference are the next productionization steps
-
-That means `gold_wind_model_inputs` is now the stable feature contract, while model fitting and scoring are still the next layer to formalize.
+- feature preparation is productionized in `gold_wind_model_inputs`
+- training is productionized in `train_round_wind_model`
+- scoring/inference is the next modeling step to formalize
 
 ---
 
-## Docs
+## Documentation
 
 Project-specific documentation lives under:
 - `docs/schemas/`
@@ -489,11 +567,14 @@ Project-specific documentation lives under:
 Relevant current docs include:
 - `docs/schemas/gold_wind_model_inputs_schema.md`
 - `docs/walkthroughs/gold_wind_model_inputs_code_walkthrough.md`
+- `docs/schemas/train_round_wind_model_schema.md`
+- `docs/walkthroughs/train_round_wind_model_code_walkthrough.md`
 
 These are intended to document:
 - schema contracts
-- transform behavior
+- transform/training behavior
 - incremental/idempotent runner logic
+- artifact and checkpoint contracts
 
 ---
 
@@ -511,7 +592,7 @@ python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-If you prefer using the pinned lockfile dependencies, install from your project’s dependency setup as appropriate for your workflow.
+If you prefer using pinned dependencies, use your normal lockfile-driven workflow.
 
 ### Environment variables
 Runtime configuration is loaded from package-specific config modules and environment variables.
@@ -533,10 +614,11 @@ The repo includes Docker support under:
 - `docker/dockerfiles/`
 - `docker/entrypoints/`
 
-Example relevant image:
+Example relevant images:
 - `docker/dockerfiles/Dockerfile.gold_wind_model_inputs`
+- `docker/dockerfiles/Dockerfile.train_round_wind_model`
 
-This supports running pipeline steps in a containerized environment consistent with the AWS-native design.
+This supports running pipeline steps in containerized environments consistent with the AWS-native design.
 
 ---
 
@@ -553,12 +635,14 @@ python -m silver_weather_observations.runner --run-mode pending_only --progress-
 python -m silver_weather_enriched.runner --run-mode pending_only --progress-every 25
 python -m gold_wind_effects.runner --run-mode pending_only --progress-every 25
 python -m gold_wind_model_inputs.runner --run-mode pending_only --progress-every 25
+python -m train_round_wind_model.runner --log-level INFO
 ```
 
 For targeted rebuilds, use:
 - `--event-ids`
 - `--force-events`
 - `--run-mode full_check`
+- `--force-train`
 
 ---
 
@@ -573,20 +657,22 @@ python -m pytest -v
 Run tests for a specific package:
 
 ```powershell
-python -m pytest tests/gold_wind_model_inputs -v
-python -m pytest tests/gold_wind_effects -v
-python -m pytest tests/silver_weather_enriched -v
-python -m pytest tests/silver_weather_observations -v
-python -m pytest tests/silver_pdga_live_results -v
-python -m pytest tests/ingest_weather_observations -v
-python -m pytest tests/ingest_pdga_live_results -v
 python -m pytest tests/ingest_pdga_event_pages -v
+python -m pytest tests/ingest_pdga_live_results -v
+python -m pytest tests/ingest_weather_observations -v
+python -m pytest tests/silver_pdga_live_results -v
+python -m pytest tests/silver_weather_observations -v
+python -m pytest tests/silver_weather_enriched -v
+python -m pytest tests/gold_wind_effects -v
+python -m pytest tests/gold_wind_model_inputs -v
+python -m pytest tests/train_round_wind_model -v
 ```
 
-A fast focused test loop while iterating on the model-input layer:
+Fast focused loops:
 
 ```powershell
 python -m pytest tests/gold_wind_model_inputs -q
+python -m pytest tests/train_round_wind_model -q
 ```
 
 ---
@@ -597,9 +683,9 @@ This project is intentionally built around a few production-style principles:
 
 - idempotent event-level reruns
 - deterministic outputs and hashes
-- versioned transforms
+- versioned transforms and model artifacts
 - quarantine on data-quality failure
-- clear Bronze/Silver/Gold separation
+- clear Bronze / Silver / Gold / Modeling separation
 - reusable fact layers before model-specific feature layers
 - notebook experimentation feeding back into production contracts only after validation
 
@@ -609,11 +695,11 @@ This project is intentionally built around a few production-style principles:
 
 The next major production steps are:
 
-1. finalize and stabilize `gold_wind_model_inputs` round-only schema and DQ behavior
-2. build a production training job for the round-level one-stage CatBoost model
-3. build a production inference/scoring job using the same feature contract
+1. stabilize `gold_wind_model_inputs` round-only schema and DQ behavior
+2. stabilize `train_round_wind_model` training artifact and checkpoint contract
+3. build a production `score_round_wind_model` step
 4. write scored output tables for downstream analysis and reporting
-5. keep tightening documentation so the pipeline remains understandable and reproducible
+5. keep tightening docs so the pipeline remains understandable and reproducible
 
 ---
 
@@ -621,10 +707,12 @@ The next major production steps are:
 
 This repo is intentionally being developed as both:
 - a portfolio-grade analytics project
-- a production-style data engineering system
+- a production-style data engineering and modeling system
 
-That means some notebook-based experimentation still exists, but the direction of travel is:
+That means notebook-based exploration still exists, but the direction of travel is:
+
 - move stable logic into versioned pipeline code
 - keep exploration in notebooks
-- keep the production data contracts small, explicit, and testable
+- keep production data contracts explicit and testable
+- keep training and, later, scoring as first-class pipeline steps
 ```
