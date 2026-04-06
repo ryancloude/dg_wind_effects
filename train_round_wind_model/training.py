@@ -26,6 +26,11 @@ from train_round_wind_model.models import (
     VALID_SIZE_WITHIN_TRAIN,
 )
 
+WIND_SPEED_REFERENCE_MPH = 2.0
+WIND_GUST_REFERENCE_MPH = 3.0
+TEMPERATURE_REFERENCE_C = 12.0
+PRECIP_REFERENCE_MM = 0.0
+
 
 @dataclass(frozen=True)
 class TrainingResult:
@@ -158,6 +163,10 @@ def train_round_model(
     event_ids: list[int] | None = None,
 ) -> TrainingResult:
     df, filter_stats = prepare_training_dataframe(df)
+
+    pressure_reference_hpa = float(df["round_pressure_hpa_mean"].median())
+    humidity_reference_pct = float(df["round_humidity_pct_mean"].median())
+
     train_df, valid_df, test_df, feature_cols, cat_idx = _prepare_split_frames(df)
 
     train_pool = Pool(
@@ -225,6 +234,12 @@ def train_round_model(
         "random_state": RANDOM_STATE,
         "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
         "catboost_params": CATBOOST_PARAMS,
+        "wind_speed_reference_mph": WIND_SPEED_REFERENCE_MPH,
+        "wind_gust_reference_mph": WIND_GUST_REFERENCE_MPH,
+        "temperature_reference_c": TEMPERATURE_REFERENCE_C,
+        "precip_reference_mm": PRECIP_REFERENCE_MM,
+        "pressure_reference_hpa": pressure_reference_hpa,
+        "humidity_reference_pct": humidity_reference_pct,
         **metrics,
     }
 
