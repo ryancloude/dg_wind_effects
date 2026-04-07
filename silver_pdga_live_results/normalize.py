@@ -13,6 +13,7 @@ DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 GLOBAL_MEDIAN_LAG_MINUTES = 449
 FIXED_ROUND_DURATION_MINUTES = 240
 
+
 def _normalize_text(value: Any) -> str:
     if value is None:
         return ""
@@ -141,16 +142,6 @@ def _build_tee_time_join(
     scorecard_updated_at_ts: str,
     event_start_date: str,
 ) -> dict[str, Any]:
-    """
-    Local (non-UTC-converted) timestamp used for weather join.
-
-    Priority:
-    1) round_date_interp + tee_time_raw
-    2) tee_time_est_ts when tee raw missing but score exists
-    3) round_date_interp + 12:00:00
-    4) event_start_date + 12:00:00
-    5) blank
-    """
     tee_clock = _parse_tee_clock(tee_time_raw)
     round_date = _parse_iso_date(round_date_interp)
 
@@ -163,7 +154,6 @@ def _build_tee_time_join(
             "tee_time_join_confidence": 1.00,
         }
 
-    # Explicit fallback path requested: when tee raw is missing, use existing score-based logic.
     if not _normalize_text(tee_time_raw):
         if _parse_ts(scorecard_updated_at_ts) is not None and _parse_ts(tee_time_est_ts) is not None:
             return {
@@ -194,6 +184,7 @@ def _build_tee_time_join(
         "tee_time_join_method": "missing_inputs",
         "tee_time_join_confidence": 0.00,
     }
+
 
 def _derive_max_round_number(event_metadata: dict[str, Any], round_sources: list[BronzeRoundSource]) -> int:
     max_round = 1
@@ -253,8 +244,6 @@ def _estimate_tee_time(
     scorecard_updated_at_ts: str,
     round_date_interp: str,
 ) -> dict[str, Any]:
-    FIXED_ROUND_DURATION_MINUTES = 240
-
     score_dt = _parse_ts(scorecard_updated_at_ts)
     tee_clock = _parse_tee_clock(tee_time_raw)
 
@@ -263,7 +252,6 @@ def _estimate_tee_time(
 
         if score_dt is not None:
             tee_dt = score_dt.replace(hour=hour, minute=minute, second=second, microsecond=0)
-            # If tee clock is after score clock, tee belongs to previous day.
             if tee_dt > score_dt:
                 tee_dt = tee_dt - timedelta(days=1)
 
@@ -399,16 +387,13 @@ def _extract_hole_scores(score: dict[str, Any], layout_holes: int | None) -> lis
 
     return parsed
 
+
 def _estimate_hole_times(
     *,
     tee_time_est_ts: str,
     round_duration_est_minutes: int | None,
     hole_numbers: list[int],
 ) -> dict[int, tuple[str, str]]:
-    """
-    Returns {hole_number: (hole_start_est_ts, hole_end_est_ts)}.
-    v1 uses uniform duration across scored holes.
-    """
     if not hole_numbers:
         return {}
 
@@ -424,7 +409,6 @@ def _estimate_hole_times(
     out: dict[int, tuple[str, str]] = {}
     for idx, hole_num in enumerate(ordered):
         start_dt = round_start_dt + timedelta(seconds=idx * per_hole_seconds)
-        # make final hole end exactly round_start + total_seconds
         if idx == n - 1:
             end_dt = round_start_dt + timedelta(seconds=total_seconds)
         else:
@@ -433,6 +417,7 @@ def _estimate_hole_times(
         out[hole_num] = (_format_ts(start_dt), _format_ts(end_dt))
 
     return out
+
 
 def _row_hash(row: dict[str, Any]) -> str:
     ignored = {"row_hash_sha256", "silver_run_id", "silver_processed_at_utc"}
@@ -492,6 +477,9 @@ def normalize_event_records(
                 round_number=int(round_number),
                 max_round_number=max_round_number,
             )
+
+            # Dashboard-friendly canonical round date alias.
+            round_date = round_date_interp
 
             division = _normalize_text(score.get("Division")) or source.division
             player_key, player_key_type, pdga_num, result_id = _derive_player_key(score, event_id)
@@ -555,6 +543,7 @@ def normalize_event_records(
                 "event_status_text": event_status_text,
                 "event_start_date": event_start_date,
                 "event_end_date": event_end_date,
+                "round_date": round_date,
                 "round_date_interp": round_date_interp,
                 "round_date_interp_method": round_date_interp_method,
                 "round_date_interp_confidence": round_date_interp_confidence,
@@ -646,77 +635,79 @@ def normalize_event_records(
                 hole_ordinal = _to_int(hole_spec.get("Ordinal")) or hole_number
 
                 hole_row = {
-                "event_year": event_year,
-                "tourn_id": event_id,
-                "round_number": int(round_number),
-                "hole_number": int(hole_number),
-                "player_key": player_key,
-                "player_key_type": player_key_type,
-                "pdga_num": pdga_num,
-                "result_id": result_id,
-                "score_id": _to_int(score.get("ScoreID")),
-                "round_id": _to_int(score.get("RoundID")),
-                "division": division,
-                "player_name": _normalize_text(score.get("Name")),
-                "first_name": _normalize_text(score.get("FirstName")),
-                "last_name": _normalize_text(score.get("LastName")),
-                "short_name": _normalize_text(score.get("ShortName")),
-                "profile_url": _normalize_text(score.get("ProfileURL")),
-                "player_city": _normalize_text(score.get("City")),
-                "player_state_prov": _normalize_text(score.get("StateProv")),
-                "player_country": _normalize_text(score.get("Country")),
-                "player_full_location": _normalize_text(score.get("FullLocation")),
-                "player_rating": _to_int(score.get("Rating")),
-                "event_location_raw": event_location_raw,
-                "event_city": event_city,
-                "event_state": event_state,
-                "event_country": event_country,
-                "event_start_date": event_start_date,
-                "event_end_date": event_end_date,
-                "round_date_interp": round_date_interp,
-                "round_date_interp_method": round_date_interp_method,
-                "round_date_interp_confidence": round_date_interp_confidence,
-                "layout_id": layout_id,
-                "layout_name": layout_name,
-                "course_id": course_id,
-                "course_name": course_name,
-                "layout_holes": layout_holes,
-                "hole_code": hole_code,
-                "hole_label": hole_label,
-                "hole_ordinal": hole_ordinal,
-                "hole_par": hole_par,
-                "hole_length": hole_length,
-                "hole_score": hole_score,
-                "hole_to_par": (hole_score - hole_par) if hole_par is not None else None,
-                "tee_time_join_ts": tee_join["tee_time_join_ts"],
-                "tee_time_join_method": tee_join["tee_time_join_method"],
-                "tee_time_join_confidence": tee_join["tee_time_join_confidence"],
-                "tee_time_raw": tee_time_raw,
-                "tee_time_est_ts": tee_est["tee_time_est_ts"],
-                "tee_time_est_method": tee_est["tee_time_est_method"],
-                "tee_time_est_confidence": tee_est["tee_time_est_confidence"],
-                "lag_minutes_used": tee_est["lag_minutes_used"],
-                "lag_bucket_used": tee_est["lag_bucket_used"],
-                "round_duration_est_minutes": tee_est["round_duration_est_minutes"],
-                "hole_start_est_ts": hole_time_map.get(hole_number, ("", ""))[0],
-                "hole_end_est_ts": hole_time_map.get(hole_number, ("", ""))[1],
-                "hole_time_est_method": "uniform_from_round_duration" if hole_number in hole_time_map else "missing_round_time_inputs",
-                "hole_time_est_confidence": 0.60 if hole_number in hole_time_map else 0.00,
-                "played_holes": played_holes,
-                "round_score": round_score,
-                "round_to_par": round_to_par,
-                "completed_flag": _to_bool(score.get("Completed")),
-                "round_status": _normalize_text(score.get("RoundStatus")),
-                "scorecard_updated_at_ts": scorecard_updated_at_ts,
-                "update_date_ts": update_date_ts,
-                "source_json_key": source.source_json_key,
-                "source_meta_key": source.source_meta_key or "",
-                "source_content_sha256": source.source_content_sha256,
-                "source_fetched_at_utc": source.source_fetched_at_utc,
-                "silver_run_id": run_id,
-                "silver_processed_at_utc": silver_processed_at_utc,
-                "event_source_fingerprint": event_source_fingerprint,
-            }
+                    "event_year": event_year,
+                    "tourn_id": event_id,
+                    "round_number": int(round_number),
+                    "hole_number": int(hole_number),
+                    "player_key": player_key,
+                    "player_key_type": player_key_type,
+                    "pdga_num": pdga_num,
+                    "result_id": result_id,
+                    "score_id": _to_int(score.get("ScoreID")),
+                    "round_id": _to_int(score.get("RoundID")),
+                    "division": division,
+                    "player_name": _normalize_text(score.get("Name")),
+                    "first_name": _normalize_text(score.get("FirstName")),
+                    "last_name": _normalize_text(score.get("LastName")),
+                    "short_name": _normalize_text(score.get("ShortName")),
+                    "profile_url": _normalize_text(score.get("ProfileURL")),
+                    "player_city": _normalize_text(score.get("City")),
+                    "player_state_prov": _normalize_text(score.get("StateProv")),
+                    "player_country": _normalize_text(score.get("Country")),
+                    "player_full_location": _normalize_text(score.get("FullLocation")),
+                    "player_rating": _to_int(score.get("Rating")),
+                    "event_name": event_name,
+                    "event_location_raw": event_location_raw,
+                    "event_city": event_city,
+                    "event_state": event_state,
+                    "event_country": event_country,
+                    "event_start_date": event_start_date,
+                    "event_end_date": event_end_date,
+                    "round_date": round_date,
+                    "round_date_interp": round_date_interp,
+                    "round_date_interp_method": round_date_interp_method,
+                    "round_date_interp_confidence": round_date_interp_confidence,
+                    "layout_id": layout_id,
+                    "layout_name": layout_name,
+                    "course_id": course_id,
+                    "course_name": course_name,
+                    "layout_holes": layout_holes,
+                    "hole_code": hole_code,
+                    "hole_label": hole_label,
+                    "hole_ordinal": hole_ordinal,
+                    "hole_par": hole_par,
+                    "hole_length": hole_length,
+                    "hole_score": hole_score,
+                    "hole_to_par": (hole_score - hole_par) if hole_par is not None else None,
+                    "tee_time_join_ts": tee_join["tee_time_join_ts"],
+                    "tee_time_join_method": tee_join["tee_time_join_method"],
+                    "tee_time_join_confidence": tee_join["tee_time_join_confidence"],
+                    "tee_time_raw": tee_time_raw,
+                    "tee_time_est_ts": tee_est["tee_time_est_ts"],
+                    "tee_time_est_method": tee_est["tee_time_est_method"],
+                    "tee_time_est_confidence": tee_est["tee_time_est_confidence"],
+                    "lag_minutes_used": tee_est["lag_minutes_used"],
+                    "lag_bucket_used": tee_est["lag_bucket_used"],
+                    "round_duration_est_minutes": tee_est["round_duration_est_minutes"],
+                    "hole_start_est_ts": hole_time_map.get(hole_number, ("", ""))[0],
+                    "hole_end_est_ts": hole_time_map.get(hole_number, ("", ""))[1],
+                    "hole_time_est_method": "uniform_from_round_duration" if hole_number in hole_time_map else "missing_round_time_inputs",
+                    "hole_time_est_confidence": 0.60 if hole_number in hole_time_map else 0.00,
+                    "played_holes": played_holes,
+                    "round_score": round_score,
+                    "round_to_par": round_to_par,
+                    "completed_flag": _to_bool(score.get("Completed")),
+                    "round_status": _normalize_text(score.get("RoundStatus")),
+                    "scorecard_updated_at_ts": scorecard_updated_at_ts,
+                    "update_date_ts": update_date_ts,
+                    "source_json_key": source.source_json_key,
+                    "source_meta_key": source.source_meta_key or "",
+                    "source_content_sha256": source.source_content_sha256,
+                    "source_fetched_at_utc": source.source_fetched_at_utc,
+                    "silver_run_id": run_id,
+                    "silver_processed_at_utc": silver_processed_at_utc,
+                    "event_source_fingerprint": event_source_fingerprint,
+                }
                 hole_row["row_hash_sha256"] = _row_hash(hole_row)
                 hole_rows.append(hole_row)
 

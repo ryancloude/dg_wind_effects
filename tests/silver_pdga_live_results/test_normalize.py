@@ -2,7 +2,6 @@ from silver_pdga_live_results.models import BronzeRoundSource
 from silver_pdga_live_results.normalize import normalize_event_records
 
 
-
 def test_normalize_uses_result_id_fallback_and_enriches_location():
     event_metadata = {
         "event_id": 90008,
@@ -91,6 +90,8 @@ def test_normalize_uses_result_id_fallback_and_enriches_location():
     round_row = round_rows[0]
     assert round_row["player_key"] == "RESULT#211819644"
     assert round_row["player_key_type"] == "result_id"
+    assert round_row["event_name"] == "Tall Grass Open"
+    assert round_row["round_date"] == "2025-05-17"
     assert round_row["event_location_raw"] == "Blackwell, OK, US"
     assert round_row["event_city"] == "Blackwell"
     assert round_row["event_state"] == "OK"
@@ -110,6 +111,8 @@ def test_normalize_uses_result_id_fallback_and_enriches_location():
     assert {row["hole_score"] for row in hole_rows} == {2, 3}
 
     for hole_row in hole_rows:
+        assert hole_row["event_name"] == "Tall Grass Open"
+        assert hole_row["round_date"] == "2025-05-17"
         assert hole_row["first_name"] == "Draigen"
         assert hole_row["last_name"] == "Dodson"
         assert hole_row["short_name"] == "D. Dodson"
