@@ -24,11 +24,13 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+.pytest_cache/
 
 # docker
 *.tar
-
 AGENTS.md
 *.vscode
+
+# local exports
 wind_impact_analysis/notebook_exports/
 wind_impact_analysis/catboost_info/

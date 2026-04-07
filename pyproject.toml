@@ -36,6 +36,7 @@ plan-gold-wind-effects = "gold_wind_effects.runner:main"
 plan-gold-wind-model-inputs = "gold_wind_model_inputs.runner:main"
 plan-train-round-wind-model = "train_round_wind_model.runner:main"
 plan-score-round-wind-model = "score_round_wind_model.runner:main"
+plan-report-round-weather-impacts = "report_round_weather_impacts.runner:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -50,6 +51,7 @@ include = [
   "gold_wind_model_inputs*",
   "train_round_wind_model*",
   "score_round_wind_model*",
+  "report_round_weather_impacts*",
 ]
 
 [tool.pytest.ini_options]

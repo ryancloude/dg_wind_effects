@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml README.md ./
+COPY report_round_weather_impacts/ report_round_weather_impacts/
+COPY score_round_wind_model/ score_round_wind_model/
+COPY train_round_wind_model/ train_round_wind_model/
+COPY docker/entrypoints/entrypoint_report_round_weather_impacts.sh /entrypoint_report_round_weather_impacts.sh
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e .
+
+RUN chmod +x /entrypoint_report_round_weather_impacts.sh
+
+ENTRYPOINT ["/entrypoint_report_round_weather_impacts.sh"]
+CMD ["--help"]
