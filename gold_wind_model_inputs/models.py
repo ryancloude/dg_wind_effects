@@ -4,7 +4,7 @@ PIPELINE_NAME = "gold_wind_model_inputs"
 GOLD_MODEL_INPUTS_CHECKPOINT_PK = "PIPELINE#GOLD_WIND_MODEL_INPUTS"
 
 # Bump when transform/business logic changes and should force recompute.
-MODEL_INPUTS_POLICY_VERSION = "v2"
+MODEL_INPUTS_POLICY_VERSION = "v3"
 
 ROUND_PK_COLS = ("tourn_id", "round_number", "player_key")
 
@@ -38,4 +38,16 @@ MODEL_INPUTS_ROUND_REQUIRED_COLS = (
     "round_humidity_pct_mean",
     "round_wind_speed_bucket",
     "round_wind_gust_bucket",
+    # Dashboard/reporting pass-through metadata contract
+    "player_name",
+    "event_name",
+    "event_city",
+    "event_state",
+    "event_start",
+    "event_end",
+    "round_date",
+    "course_name",
+    "layout_name",
+    "lat",
+    "lon",
 )

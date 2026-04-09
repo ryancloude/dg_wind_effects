@@ -70,6 +70,14 @@ def _first_non_null(rows: list[dict[str, Any]], field: str) -> Any:
     return None
 
 
+def _first_non_null_any(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> Any:
+    for field in fields:
+        value = _first_non_null(rows, field)
+        if value is not None and value != "":
+            return value
+    return None
+
+
 def _sum_int(rows: list[dict[str, Any]], field: str) -> int | None:
     values = [_to_int(r.get(field)) for r in rows]
     values = [v for v in values if v is not None]
@@ -164,8 +172,19 @@ def build_round_model_inputs(
             "tourn_id": _to_int(tourn_id),
             "round_number": _to_int(round_number),
             "player_key": player_key,
+            "player_name": _first_non_null(rows, "player_name"),
+            "event_name": _first_non_null_any(rows, ("event_name", "tournament_name")),
+            "event_city": _first_non_null_any(rows, ("event_city", "city")),
+            "event_state": _first_non_null_any(rows, ("event_state", "state")),
+            "event_start": _first_non_null_any(rows, ("event_start", "start_date")),
+            "event_end": _first_non_null_any(rows, ("event_end", "end_date")),
+            "round_date": _first_non_null(rows, "round_date"),
             "course_id": _first_non_null(rows, "course_id"),
+            "course_name": _first_non_null(rows, "course_name"),
             "layout_id": _first_non_null(rows, "layout_id"),
+            "layout_name": _first_non_null(rows, "layout_name"),
+            "lat": _to_float(_first_non_null_any(rows, ("lat", "latitude"))),
+            "lon": _to_float(_first_non_null_any(rows, ("lon", "longitude"))),
             "division": _first_non_null(rows, "division"),
             "player_rating": _to_float(_first_non_null(rows, "player_rating")),
             "model_inputs_grain": "round",
@@ -200,8 +219,19 @@ def build_round_model_inputs(
                 "tourn_id": rec["tourn_id"],
                 "round_number": rec["round_number"],
                 "player_key": rec["player_key"],
+                "player_name": rec["player_name"],
+                "event_name": rec["event_name"],
+                "event_city": rec["event_city"],
+                "event_state": rec["event_state"],
+                "event_start": rec["event_start"],
+                "event_end": rec["event_end"],
+                "round_date": rec["round_date"],
                 "course_id": rec["course_id"],
+                "course_name": rec["course_name"],
                 "layout_id": rec["layout_id"],
+                "layout_name": rec["layout_name"],
+                "lat": rec["lat"],
+                "lon": rec["lon"],
                 "division": rec["division"],
                 "player_rating": rec["player_rating"],
                 "actual_round_strokes": rec["actual_round_strokes"],
@@ -240,14 +270,25 @@ def compute_model_inputs_event_fingerprint(
             "round_number": r.get("round_number"),
             "hole_number": r.get("hole_number"),
             "player_key": r.get("player_key"),
+            "player_name": r.get("player_name"),
+            "event_name": r.get("event_name") or r.get("tournament_name"),
+            "event_city": r.get("event_city") or r.get("city"),
+            "event_state": r.get("event_state") or r.get("state"),
+            "event_start": r.get("event_start") or r.get("start_date"),
+            "event_end": r.get("event_end") or r.get("end_date"),
+            "round_date": r.get("round_date"),
+            "course_id": r.get("course_id"),
+            "course_name": r.get("course_name"),
+            "layout_id": r.get("layout_id"),
+            "layout_name": r.get("layout_name"),
+            "lat": r.get("lat") if r.get("lat") is not None else r.get("latitude"),
+            "lon": r.get("lon") if r.get("lon") is not None else r.get("longitude"),
+            "division": r.get("division"),
+            "player_rating": r.get("player_rating"),
             "actual_strokes": r.get("actual_strokes"),
             "strokes_over_par": r.get("strokes_over_par"),
             "hole_length": r.get("hole_length"),
             "hole_par": r.get("hole_par"),
-            "course_id": r.get("course_id"),
-            "layout_id": r.get("layout_id"),
-            "division": r.get("division"),
-            "player_rating": r.get("player_rating"),
             "wx_wind_speed_mps": r.get("wx_wind_speed_mps"),
             "wx_wind_gust_mps": r.get("wx_wind_gust_mps"),
             "wx_wind_dir_deg": r.get("wx_wind_dir_deg"),

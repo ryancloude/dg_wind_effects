@@ -10,19 +10,58 @@ from gold_wind_model_inputs.models import (
 def test_model_constants_exist():
     assert PIPELINE_NAME == "gold_wind_model_inputs"
     assert GOLD_MODEL_INPUTS_CHECKPOINT_PK == "PIPELINE#GOLD_WIND_MODEL_INPUTS"
-    assert MODEL_INPUTS_POLICY_VERSION == "v2"
-
-
-def test_required_columns_include_core_fields():
+    assert MODEL_INPUTS_POLICY_VERSION == "v3"
     assert ROUND_PK_COLS == ("tourn_id", "round_number", "player_key")
 
-    assert "actual_round_strokes" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "round_strokes_over_par" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "weather_available_flag" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "row_hash_sha256" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "round_total_hole_length" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "round_total_par" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "round_wind_speed_mps_mean" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "round_wind_gust_mps_mean" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "round_temp_c_mean" in MODEL_INPUTS_ROUND_REQUIRED_COLS
-    assert "round_wind_speed_bucket" in MODEL_INPUTS_ROUND_REQUIRED_COLS
+
+def test_round_required_cols_include_core_fields():
+    required = set(MODEL_INPUTS_ROUND_REQUIRED_COLS)
+
+    core_expected = {
+        "event_year",
+        "tourn_id",
+        "round_number",
+        "player_key",
+        "model_inputs_grain",
+        "model_inputs_version",
+        "model_inputs_run_id",
+        "model_inputs_processed_at_utc",
+        "row_hash_sha256",
+        "actual_round_strokes",
+        "round_strokes_over_par",
+        "weather_available_flag",
+        "hole_count",
+        "round_total_hole_length",
+        "round_avg_hole_length",
+        "round_total_par",
+        "round_avg_hole_par",
+        "round_length_over_par",
+        "round_wind_speed_mps_mean",
+        "round_wind_speed_mps_max",
+        "round_wind_gust_mps_mean",
+        "round_wind_gust_mps_max",
+        "round_temp_c_mean",
+        "round_precip_mm_sum",
+        "round_precip_mm_mean",
+        "round_pressure_hpa_mean",
+        "round_humidity_pct_mean",
+        "round_wind_speed_bucket",
+        "round_wind_gust_bucket",
+    }
+
+    dashboard_metadata_expected = {
+        "player_name",
+        "event_name",
+        "event_city",
+        "event_state",
+        "event_start",
+        "event_end",
+        "round_date",
+        "course_name",
+        "layout_name",
+        "lat",
+        "lon",
+    }
+
+    assert core_expected.issubset(required)
+    assert dashboard_metadata_expected.issubset(required)

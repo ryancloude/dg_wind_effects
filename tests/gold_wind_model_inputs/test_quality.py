@@ -17,8 +17,19 @@ def _round_output():
         "tourn_id": 90008,
         "round_number": 1,
         "player_key": "P1",
+        "player_name": "Pat One",
+        "event_name": "Test Open",
+        "event_city": "Austin",
+        "event_state": "TX",
+        "event_start": "2026-04-10",
+        "event_end": "2026-04-12",
+        "round_date": "2026-04-10",
+        "course_name": "Live Oak DGC",
+        "layout_name": "Blue Layout",
+        "lat": 30.2672,
+        "lon": -97.7431,
         "model_inputs_grain": "round",
-        "model_inputs_version": "v2",
+        "model_inputs_version": "v3",
         "model_inputs_run_id": "run-1",
         "model_inputs_processed_at_utc": "2026-03-31T12:00:00Z",
         "row_hash_sha256": "abc",
@@ -78,3 +89,4 @@ def test_validate_model_inputs_quality_duplicate_round_pk():
         round_output_rows=out,
     )
     assert any(e["rule"] == "uniqueness:round_pk" for e in errors)
+
