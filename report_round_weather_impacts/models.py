@@ -11,6 +11,7 @@ MPS_TO_MPH = 2.23694
 
 REPORT_TABLES = (
     "weather_overview",
+    "weather_impact_distribution",
     "weather_by_wind_bucket",
     "weather_by_temperature_band",
     "weather_by_month",

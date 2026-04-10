@@ -187,6 +187,65 @@ FROM {source}
             select_sql=select_sql,
         )
 
+    if report_table_name == "weather_impact_distribution":
+        select_sql = f"""
+WITH bins AS (
+  SELECT *
+  FROM (
+    VALUES
+      ('total_weather', '< -3.0', CAST(NULL AS double), CAST(-3.0 AS double), 0),
+      ('total_weather', '-3.0 to -2.5', CAST(-3.0 AS double), CAST(-2.5 AS double), 1),
+      ('total_weather', '-2.5 to -2.0', CAST(-2.5 AS double), CAST(-2.0 AS double), 2),
+      ('total_weather', '-2.0 to -1.5', CAST(-2.0 AS double), CAST(-1.5 AS double), 3),
+      ('total_weather', '-1.5 to -1.0', CAST(-1.5 AS double), CAST(-1.0 AS double), 4),
+      ('total_weather', '-1.0 to -0.5', CAST(-1.0 AS double), CAST(-0.5 AS double), 5),
+      ('total_weather', '-0.5 to 0.0', CAST(-0.5 AS double), CAST(0.0 AS double), 6),
+      ('total_weather', '0.0 to 0.5', CAST(0.0 AS double), CAST(0.5 AS double), 7),
+      ('total_weather', '0.5 to 1.0', CAST(0.5 AS double), CAST(1.0 AS double), 8),
+      ('total_weather', '1.0 to 1.5', CAST(1.0 AS double), CAST(1.5 AS double), 9),
+      ('total_weather', '1.5 to 2.0', CAST(1.5 AS double), CAST(2.0 AS double), 10),
+      ('total_weather', '2.0 to 2.5', CAST(2.0 AS double), CAST(2.5 AS double), 11),
+      ('total_weather', '2.5 to 3.0', CAST(2.5 AS double), CAST(3.0 AS double), 12),
+      ('total_weather', '3.0 to 3.5', CAST(3.0 AS double), CAST(3.5 AS double), 13),
+      ('total_weather', '3.5 to 4.0', CAST(3.5 AS double), CAST(4.0 AS double), 14),
+      ('total_weather', '4.0 to 4.5', CAST(4.0 AS double), CAST(4.5 AS double), 15),
+      ('total_weather', '4.5 to 5.0', CAST(4.5 AS double), CAST(5.0 AS double), 16),
+      ('total_weather', '5.0 to 5.5', CAST(5.0 AS double), CAST(5.5 AS double), 17),
+      ('total_weather', '5.5 to 6.0', CAST(5.5 AS double), CAST(6.0 AS double), 18),
+      ('total_weather', '>= 6.0', CAST(6.0 AS double), CAST(NULL AS double), 19)
+  ) AS t (impact_metric, impact_bin_label, impact_bin_start, impact_bin_end, sort_order)
+),
+source_rows AS (
+  SELECT estimated_total_weather_impact_strokes
+  FROM {source}
+  WHERE estimated_total_weather_impact_strokes IS NOT NULL
+)
+SELECT
+  b.impact_metric,
+  b.impact_bin_label,
+  b.impact_bin_start,
+  b.impact_bin_end,
+  COALESCE(COUNT(s.estimated_total_weather_impact_strokes), 0) AS rounds_scored,
+  b.sort_order
+FROM bins b
+LEFT JOIN source_rows s
+  ON (
+    (b.impact_bin_start IS NULL AND s.estimated_total_weather_impact_strokes < b.impact_bin_end)
+    OR
+    (b.impact_bin_end IS NULL AND s.estimated_total_weather_impact_strokes >= b.impact_bin_start)
+    OR
+    (
+      b.impact_bin_start IS NOT NULL
+      AND b.impact_bin_end IS NOT NULL
+      AND s.estimated_total_weather_impact_strokes >= b.impact_bin_start
+      AND s.estimated_total_weather_impact_strokes < b.impact_bin_end
+    )
+  )
+GROUP BY 1,2,3,4,6
+ORDER BY sort_order
+""".strip()
+        return _ctas_sql(database=database, table_name=report_table_name, external_location=external_location, select_sql=select_sql)
+
     if report_table_name == "weather_by_wind_bucket":
         select_sql = f"""
 SELECT

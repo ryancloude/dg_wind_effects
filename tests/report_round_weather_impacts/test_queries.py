@@ -40,6 +40,23 @@ def test_build_report_ctas_sql_for_weather_by_state_uses_base_table():
     assert "avg_estimated_wind_impact_strokes" in sql.lower()
 
 
+def test_build_report_ctas_sql_for_distribution_table_has_bins():
+    sql = build_report_ctas_sql(
+        database="pdga_analytics",
+        base_table_name="reporting_base_rounds",
+        report_table_name="weather_impact_distribution",
+        external_location="s3://bucket/gold/pdga/wind_effects/reports/published/weather_impact_distribution/",
+    )
+
+    assert "CREATE TABLE pdga_analytics.weather_impact_distribution" in sql
+    assert "VALUES" in sql
+    assert "'< -3.0'" in sql
+    assert "'0.0 to 0.5'" in sql
+    assert "'>= 6.0'" in sql
+    assert "estimated_total_weather_impact_strokes" in sql
+    assert "rounds_scored" in sql
+
+
 def test_build_report_ctas_sql_for_event_round_includes_round_grain():
     sql = build_report_ctas_sql(
         database="pdga_analytics",
