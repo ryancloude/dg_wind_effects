@@ -1,17 +1,19 @@
 from types import SimpleNamespace
 
-import pandas as pd
-
 import report_round_weather_impacts.runner as runner
 
 
-def test_runner_skips_existing_success(monkeypatch):
+def test_runner_dry_run_prints_plan(monkeypatch, capsys):
     args = SimpleNamespace(
-        event_ids=None,
+        tables="weather_by_state,weather_by_event",
         bucket=None,
         ddb_table=None,
+        athena_database=None,
+        athena_workgroup=None,
+        athena_results_s3_uri=None,
+        source_table=None,
+        base_table_name=None,
         dry_run=True,
-        force_events=False,
         log_level="INFO",
     )
 
@@ -19,29 +21,37 @@ def test_runner_skips_existing_success(monkeypatch):
     monkeypatch.setattr(
         runner,
         "load_config",
-        lambda: SimpleNamespace(s3_bucket="bucket", ddb_table="table", aws_region="us-east-1"),
-    )
-    monkeypatch.setattr(
-        runner,
-        "list_scored_event_objects",
-        lambda **kwargs: [{"key": "gold/pdga/wind_effects/scored_rounds/event_year=2026/tourn_id=90008/scored_rounds.parquet", "etag": "e1", "size": 1, "last_modified": "x"}],
-    )
-    monkeypatch.setattr(
-        runner,
-        "get_report_checkpoint",
-        lambda **kwargs: {"status": "success", "scored_input_fingerprint": runner._fingerprint_event_object({"key": "gold/pdga/wind_effects/scored_rounds/event_year=2026/tourn_id=90008/scored_rounds.parquet", "etag": "e1", "size": 1, "last_modified": "x"})},
+        lambda: SimpleNamespace(
+            s3_bucket="bucket",
+            ddb_table="table",
+            athena_database="pdga_analytics",
+            athena_workgroup="pdga-analytics",
+            athena_results_s3_uri="s3://athena-results/query-results/",
+            athena_source_scored_table="scored_rounds",
+            athena_reporting_base_table="reporting_base_rounds",
+            aws_region="us-east-1",
+        ),
     )
 
     assert runner.main() == 0
+    out = capsys.readouterr().out
+    assert "report_round_weather_impacts_plan" in out
+    assert "weather_by_state" in out
+    assert "weather_by_event" in out
+    assert "CREATE TABLE pdga_analytics.reporting_base_rounds" in out
 
 
-def test_runner_processes_and_publishes(monkeypatch):
+def test_runner_rebuilds_base_and_selected_tables(monkeypatch):
     args = SimpleNamespace(
-        event_ids=None,
+        tables="weather_by_state,weather_by_event",
         bucket=None,
         ddb_table=None,
+        athena_database=None,
+        athena_workgroup=None,
+        athena_results_s3_uri=None,
+        source_table=None,
+        base_table_name=None,
         dry_run=False,
-        force_events=False,
         log_level="INFO",
     )
 
@@ -49,92 +59,59 @@ def test_runner_processes_and_publishes(monkeypatch):
     monkeypatch.setattr(
         runner,
         "load_config",
-        lambda: SimpleNamespace(s3_bucket="bucket", ddb_table="table", aws_region="us-east-1"),
-    )
-    monkeypatch.setattr(
-        runner,
-        "list_scored_event_objects",
-        lambda **kwargs: [{"key": "gold/pdga/wind_effects/scored_rounds/event_year=2026/tourn_id=90008/scored_rounds.parquet", "etag": "e1", "size": 1, "last_modified": "x"}],
-    )
-    monkeypatch.setattr(runner, "get_report_checkpoint", lambda **kwargs: None)
-    monkeypatch.setattr(
-        runner,
-        "load_scored_event_dataframe",
-        lambda **kwargs: pd.DataFrame(
-            [
-                {
-                    "event_year": 2026,
-                    "tourn_id": 90008,
-                    "round_number": 1,
-                    "player_key": "P1",
-                    "course_id": "101",
-                    "layout_id": "201",
-                    "division": "MA3",
-                    "player_rating": 915,
-                    "actual_round_strokes": 57,
-                    "predicted_round_strokes": 58.0,
-                    "predicted_round_strokes_wind_reference": 56.5,
-                    "estimated_wind_impact_strokes": 1.5,
-                    "estimated_temperature_impact_strokes": 0.5,
-                    "estimated_total_weather_impact_strokes": 2.0,
-                    "round_wind_speed_mps_mean": 4.0,
-                    "round_temp_c_mean": 20.0,
-                    "state": "TX",
-                }
-            ]
+        lambda: SimpleNamespace(
+            s3_bucket="bucket",
+            ddb_table="table",
+            athena_database="pdga_analytics",
+            athena_workgroup="pdga-analytics",
+            athena_results_s3_uri="s3://athena-results/query-results/",
+            athena_source_scored_table="scored_rounds",
+            athena_reporting_base_table="reporting_base_rounds",
+            aws_region="us-east-1",
         ),
     )
-    monkeypatch.setattr(
-        runner,
-        "prepare_reporting_dataframe",
-        lambda df: pd.DataFrame(
-            [
-                {
-                    "event_year": 2026,
-                    "tourn_id": 90008,
-                    "event_name": "Test Event",
-                    "state": "TX",
-                    "city": "Austin",
-                    "lat": 30.0,
-                    "lon": -97.0,
-                    "round_year": 2026,
-                    "round_month": 4,
-                    "round_month_label": "Apr",
-                    "round_number": 1,
-                    "player_key": "P1",
-                    "division": "MA3",
-                    "rating_band": "900-939",
-                    "temperature_band_f": "60-69F",
-                    "round_wind_speed_bucket": "light",
-                    "course_id": "101",
-                    "layout_id": "201",
-                    "observed_wind_mph": 9.0,
-                    "observed_temp_f": 68.0,
-                    "actual_round_strokes": 57.0,
-                    "predicted_round_strokes": 58.0,
-                    "predicted_round_strokes_wind_reference": 56.5,
-                    "estimated_wind_impact_strokes": 1.5,
-                    "estimated_temperature_impact_strokes": 0.5,
-                    "estimated_total_weather_impact_strokes": 2.0,
-                }
-            ]
-        ),
-    )
-    monkeypatch.setattr(
-        runner,
-        "build_event_contributions",
-        lambda df: {"weather_overview": pd.DataFrame([{"event_year": 2026, "tourn_id": 90008, "rounds_scored": 1}])},
-    )
-    monkeypatch.setattr(runner, "write_intermediate_table", lambda **kwargs: "intermediate.parquet")
-    monkeypatch.setattr(runner, "build_published_table", lambda **kwargs: pd.DataFrame([{"rounds_scored": 1}]))
-    monkeypatch.setattr(runner, "write_published_table", lambda **kwargs: "published.parquet")
 
+    delete_calls = []
+    query_calls = []
     checkpoint_calls = []
     summary_calls = []
 
-    monkeypatch.setattr(runner, "put_report_checkpoint", lambda **kwargs: checkpoint_calls.append(kwargs))
-    monkeypatch.setattr(runner, "put_report_run_summary", lambda **kwargs: summary_calls.append(kwargs))
+    monkeypatch.setattr(
+        runner,
+        "delete_s3_prefix",
+        lambda **kwargs: delete_calls.append(kwargs) or 0,
+    )
+    monkeypatch.setattr(
+        runner,
+        "execute_athena_query",
+        lambda **kwargs: query_calls.append(kwargs)
+        or {
+            "query_execution_id": f"q{len(query_calls)}",
+            "state": "SUCCEEDED",
+            "scanned_bytes": 1024,
+            "engine_execution_time_ms": 250,
+            "total_execution_time_ms": 350,
+            "output_location": kwargs["output_location"],
+            "sql": kwargs["sql"],
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "put_report_table_checkpoint",
+        lambda **kwargs: checkpoint_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        runner,
+        "put_report_run_summary",
+        lambda **kwargs: summary_calls.append(kwargs),
+    )
 
     assert runner.main() == 0
-    assert len(checkpoint_calls) == 1
+
+    assert len(delete_calls) == 3
+    assert len(query_calls) == 6
+    assert len(checkpoint_calls) == 2
     assert len(summary_calls) == 1
+    assert checkpoint_calls[0]["report_table"] == "weather_by_state"
+    assert checkpoint_calls[1]["report_table"] == "weather_by_event"
+

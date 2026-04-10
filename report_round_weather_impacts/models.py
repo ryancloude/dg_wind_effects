@@ -2,10 +2,9 @@ from __future__ import annotations
 
 PIPELINE_NAME = "report_round_weather_impacts"
 REPORT_CHECKPOINT_PK = "PIPELINE#REPORT_ROUND_WEATHER_IMPACTS"
-REPORT_POLICY_VERSION = "v1"
+REPORT_POLICY_VERSION = "v2"
 
-SCORED_ROUNDS_PREFIX = "gold/pdga/wind_effects/scored_rounds/"
-INTERMEDIATE_BASE_PREFIX = "gold/pdga/wind_effects/reports/intermediate/"
+ATHENA_BASE_PREFIX = "gold/pdga/wind_effects/reports/athena/base/"
 PUBLISHED_BASE_PREFIX = "gold/pdga/wind_effects/reports/published/"
 
 MPS_TO_MPH = 2.23694
@@ -24,32 +23,3 @@ REPORT_TABLES = (
     "weather_by_event_round",
 )
 
-REQUIRED_SCORED_COLS = (
-    "event_year",
-    "tourn_id",
-    "round_number",
-    "player_key",
-    "course_id",
-    "layout_id",
-    "division",
-    "player_rating",
-    "actual_round_strokes",
-    "predicted_round_strokes",
-    "predicted_round_strokes_wind_reference",
-    "estimated_wind_impact_strokes",
-    "estimated_temperature_impact_strokes",
-    "estimated_total_weather_impact_strokes",
-    "round_wind_speed_mps_mean",
-    "round_temp_c_mean",
-)
-
-SUM_METRIC_COLS = (
-    "sum_observed_wind_mph",
-    "sum_observed_temp_f",
-    "sum_actual_round_strokes",
-    "sum_predicted_round_strokes",
-    "sum_predicted_round_strokes_wind_reference",
-    "sum_estimated_wind_impact_strokes",
-    "sum_estimated_temperature_impact_strokes",
-    "sum_estimated_total_weather_impact_strokes",
-)

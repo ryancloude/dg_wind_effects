@@ -1,49 +1,45 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
-from report_round_weather_impacts.aggregations import build_event_contributions
+from report_round_weather_impacts.athena_io import delete_s3_prefix, execute_athena_query
 from report_round_weather_impacts.config import load_config
-from report_round_weather_impacts.dimensions import prepare_reporting_dataframe
-from report_round_weather_impacts.dynamo_io import (
-    get_report_checkpoint,
-    put_report_checkpoint,
-    put_report_run_summary,
+from report_round_weather_impacts.dynamo_io import put_report_run_summary, put_report_table_checkpoint
+from report_round_weather_impacts.models import (
+    ATHENA_BASE_PREFIX,
+    PUBLISHED_BASE_PREFIX,
+    REPORT_POLICY_VERSION,
+    REPORT_TABLES,
 )
-from report_round_weather_impacts.models import REPORT_POLICY_VERSION, REPORT_TABLES
-from report_round_weather_impacts.parquet_io import write_intermediate_table, write_published_table
-from report_round_weather_impacts.publish import build_published_table
-from report_round_weather_impacts.scored_io import list_scored_event_objects, load_scored_event_dataframe
+from report_round_weather_impacts.queries import (
+    build_drop_table_sql,
+    build_report_ctas_sql,
+    build_reporting_base_ctas_sql,
+)
 
 logger = logging.getLogger("report_round_weather_impacts")
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass
 class RunStats:
-    attempted_events: int = 0
-    processed_events: int = 0
-    skipped_unchanged_events: int = 0
-    failed_events: int = 0
-    published_tables: int = 0
-    rows_input: int = 0
-    rows_retained: int = 0
+    refreshed_tables: int = 0
+    failed_tables: int = 0
+    athena_queries_executed: int = 0
+    total_scanned_bytes: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
-            "attempted_events": self.attempted_events,
-            "processed_events": self.processed_events,
-            "skipped_unchanged_events": self.skipped_unchanged_events,
-            "failed_events": self.failed_events,
-            "published_tables": self.published_tables,
-            "rows_input": self.rows_input,
-            "rows_retained": self.rows_retained,
+            "refreshed_tables": self.refreshed_tables,
+            "failed_tables": self.failed_tables,
+            "athena_queries_executed": self.athena_queries_executed,
+            "total_scanned_bytes": self.total_scanned_bytes,
         }
 
 
@@ -53,20 +49,40 @@ def make_run_id() -> str:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Build dashboard reporting tables from scored round outputs.")
-    p.add_argument("--event-ids", help="Optional comma-separated event IDs")
+    p = argparse.ArgumentParser(description="Build dashboard reporting tables with Athena from scored round outputs.")
+    p.add_argument("--tables", help="Optional comma-separated report tables to rebuild")
     p.add_argument("--bucket", help="Override S3 bucket")
     p.add_argument("--ddb-table", help="Override DynamoDB table")
+    p.add_argument("--athena-database", help="Override Athena database")
+    p.add_argument("--athena-workgroup", help="Override Athena workgroup")
+    p.add_argument("--athena-results-s3-uri", help="Override Athena query results S3 URI")
+    p.add_argument("--source-table", help="Override Athena source scored table name")
+    p.add_argument("--base-table-name", help="Override Athena reporting base table name")
     p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--force-events", action="store_true")
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
 
-def parse_event_ids(raw: str | None) -> list[int] | None:
+def parse_report_tables(raw: str | None) -> list[str]:
     if not raw:
-        return None
-    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+        return list(REPORT_TABLES)
+
+    selected = [value.strip() for value in raw.split(",") if value.strip()]
+    invalid = [value for value in selected if value not in REPORT_TABLES]
+    if invalid:
+        raise ValueError(f"unsupported report tables: {invalid}")
+    return selected
+
+
+def _validate_identifier(value: str, label: str) -> str:
+    if not _IDENTIFIER_RE.match(value):
+        raise ValueError(f"invalid {label}: {value}")
+    return value
+
+
+def _s3_uri(bucket: str, prefix: str) -> str:
+    clean = prefix.strip("/")
+    return f"s3://{bucket}/{clean}/"
 
 
 def _log_phase_timing(*, run_id: str, phase: str, started_at: float, extra: dict | None = None) -> None:
@@ -78,22 +94,38 @@ def _log_phase_timing(*, run_id: str, phase: str, started_at: float, extra: dict
     print({"report_round_weather_impacts_phase_complete": payload})
 
 
-def _event_id_from_key(key: str) -> int:
-    marker = "tourn_id="
-    start = key.index(marker) + len(marker)
-    end = key.index("/", start)
-    return int(key[start:end])
-
-
-def _fingerprint_event_object(event_object: dict[str, Any]) -> str:
-    payload = {
-        "key": str(event_object.get("key", "")),
-        "etag": str(event_object.get("etag", "")),
-        "size": int(event_object.get("size", 0) or 0),
-        "last_modified": str(event_object.get("last_modified", "")),
-    }
-    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _execute_statement(
+    *,
+    run_id: str,
+    phase: str,
+    sql: str,
+    database: str,
+    workgroup: str,
+    output_location: str,
+    aws_region: str | None,
+    stats: RunStats,
+) -> dict:
+    started = time.perf_counter()
+    result = execute_athena_query(
+        sql=sql,
+        database=database,
+        workgroup=workgroup,
+        output_location=output_location,
+        aws_region=aws_region,
+    )
+    stats.athena_queries_executed += 1
+    stats.total_scanned_bytes += int(result.get("scanned_bytes", 0) or 0)
+    _log_phase_timing(
+        run_id=run_id,
+        phase=phase,
+        started_at=started,
+        extra={
+            "query_execution_id": result["query_execution_id"],
+            "scanned_bytes": result["scanned_bytes"],
+            "engine_execution_time_ms": result["engine_execution_time_ms"],
+        },
+    )
+    return result
 
 
 def main() -> int:
@@ -107,144 +139,195 @@ def main() -> int:
     cfg = load_config()
     bucket = args.bucket or cfg.s3_bucket
     ddb_table = args.ddb_table or cfg.ddb_table
-    event_ids = parse_event_ids(args.event_ids)
+    athena_database = _validate_identifier(args.athena_database or cfg.athena_database, "Athena database")
+    athena_workgroup = args.athena_workgroup or cfg.athena_workgroup
+    athena_results_s3_uri = args.athena_results_s3_uri or cfg.athena_results_s3_uri
+    source_table = _validate_identifier(args.source_table or cfg.athena_source_scored_table, "source table")
+    base_table_name = _validate_identifier(args.base_table_name or cfg.athena_reporting_base_table, "base table name")
+    selected_tables = parse_report_tables(args.tables)
+
     run_id = make_run_id()
     stats = RunStats()
 
     try:
-        t0 = time.perf_counter()
-        event_objects = list_scored_event_objects(bucket=bucket, event_ids=event_ids)
+        base_external_location = _s3_uri(bucket, f"{ATHENA_BASE_PREFIX}{base_table_name}")
+        report_external_locations = {
+            table_name: _s3_uri(bucket, f"{PUBLISHED_BASE_PREFIX}{table_name}")
+            for table_name in selected_tables
+        }
+
+        if args.dry_run:
+            print(
+                {
+                    "report_round_weather_impacts_plan": {
+                        "run_id": run_id,
+                        "athena_database": athena_database,
+                        "athena_workgroup": athena_workgroup,
+                        "source_table": source_table,
+                        "base_table_name": base_table_name,
+                        "selected_tables": selected_tables,
+                        "base_external_location": base_external_location,
+                        "report_external_locations": report_external_locations,
+                    }
+                }
+            )
+            print(build_drop_table_sql(database=athena_database, table_name=base_table_name))
+            print(
+                build_reporting_base_ctas_sql(
+                    database=athena_database,
+                    source_table=source_table,
+                    base_table_name=base_table_name,
+                    external_location=base_external_location,
+                )
+            )
+            for table_name in selected_tables:
+                print(build_drop_table_sql(database=athena_database, table_name=table_name))
+                print(
+                    build_report_ctas_sql(
+                        database=athena_database,
+                        base_table_name=base_table_name,
+                        report_table_name=table_name,
+                        external_location=report_external_locations[table_name],
+                    )
+                )
+            return 0
+
+        t_base_cleanup = time.perf_counter()
+        deleted_base = delete_s3_prefix(s3_uri=base_external_location, aws_region=cfg.aws_region)
         _log_phase_timing(
             run_id=run_id,
-            phase="list_scored_event_objects",
-            started_at=t0,
-            extra={"event_object_count": len(event_objects)},
+            phase="delete_reporting_base_prefix",
+            started_at=t_base_cleanup,
+            extra={"deleted_objects": deleted_base, "s3_uri": base_external_location},
         )
 
-        for event_object in event_objects:
-            stats.attempted_events += 1
-            event_id = _event_id_from_key(event_object["key"])
-            scored_input_fingerprint = _fingerprint_event_object(event_object)
+        _execute_statement(
+            run_id=run_id,
+            phase="drop_reporting_base_table",
+            sql=build_drop_table_sql(database=athena_database, table_name=base_table_name),
+            database=athena_database,
+            workgroup=athena_workgroup,
+            output_location=athena_results_s3_uri,
+            aws_region=cfg.aws_region,
+            stats=stats,
+        )
 
+        _execute_statement(
+            run_id=run_id,
+            phase="create_reporting_base_table",
+            sql=build_reporting_base_ctas_sql(
+                database=athena_database,
+                source_table=source_table,
+                base_table_name=base_table_name,
+                external_location=base_external_location,
+            ),
+            database=athena_database,
+            workgroup=athena_workgroup,
+            output_location=athena_results_s3_uri,
+            aws_region=cfg.aws_region,
+            stats=stats,
+        )
+
+        for table_name in selected_tables:
             try:
-                checkpoint = get_report_checkpoint(
-                    table_name=ddb_table,
-                    event_id=event_id,
-                    report_policy_version=REPORT_POLICY_VERSION,
-                    aws_region=cfg.aws_region,
-                )
+                target_s3_uri = report_external_locations[table_name]
 
-                if (
-                    not args.force_events
-                    and checkpoint
-                    and str(checkpoint.get("status", "")).strip().lower() == "success"
-                    and str(checkpoint.get("scored_input_fingerprint", "")) == scored_input_fingerprint
-                ):
-                    stats.skipped_unchanged_events += 1
-                    continue
-
-                t_load = time.perf_counter()
-                raw_df = load_scored_event_dataframe(bucket=bucket, key=event_object["key"])
-                stats.rows_input += int(len(raw_df))
-                prepared_df = prepare_reporting_dataframe(raw_df)
-                stats.rows_retained += int(len(prepared_df))
+                t_delete = time.perf_counter()
+                deleted = delete_s3_prefix(s3_uri=target_s3_uri, aws_region=cfg.aws_region)
                 _log_phase_timing(
                     run_id=run_id,
-                    phase="prepare_reporting_dataframe",
-                    started_at=t_load,
-                    extra={"event_id": event_id, "rows_input": len(raw_df), "rows_retained": len(prepared_df)},
+                    phase="delete_published_prefix",
+                    started_at=t_delete,
+                    extra={"report_table": table_name, "deleted_objects": deleted, "s3_uri": target_s3_uri},
                 )
 
-                event_year = int(prepared_df["event_year"].iloc[0])
-                contributions = build_event_contributions(prepared_df)
+                _execute_statement(
+                    run_id=run_id,
+                    phase=f"drop_{table_name}",
+                    sql=build_drop_table_sql(database=athena_database, table_name=table_name),
+                    database=athena_database,
+                    workgroup=athena_workgroup,
+                    output_location=athena_results_s3_uri,
+                    aws_region=cfg.aws_region,
+                    stats=stats,
+                )
 
-                if not args.dry_run:
-                    t_write = time.perf_counter()
-                    for table_name, table_df in contributions.items():
-                        write_intermediate_table(
-                            bucket=bucket,
-                            table_name=table_name,
-                            event_year=event_year,
-                            event_id=event_id,
-                            df=table_df,
-                        )
-                    _log_phase_timing(
-                        run_id=run_id,
-                        phase="write_intermediate_tables",
-                        started_at=t_write,
-                        extra={"event_id": event_id, "table_count": len(contributions)},
-                    )
+                result = _execute_statement(
+                    run_id=run_id,
+                    phase=f"create_{table_name}",
+                    sql=build_report_ctas_sql(
+                        database=athena_database,
+                        base_table_name=base_table_name,
+                        report_table_name=table_name,
+                        external_location=target_s3_uri,
+                    ),
+                    database=athena_database,
+                    workgroup=athena_workgroup,
+                    output_location=athena_results_s3_uri,
+                    aws_region=cfg.aws_region,
+                    stats=stats,
+                )
 
-                    put_report_checkpoint(
-                        table_name=ddb_table,
-                        event_id=event_id,
-                        report_policy_version=REPORT_POLICY_VERSION,
-                        run_id=run_id,
-                        status="success",
-                        aws_region=cfg.aws_region,
-                        extra_attributes={
-                            "event_year": event_year,
-                            "source_scored_key": event_object["key"],
-                            "scored_input_fingerprint": scored_input_fingerprint,
-                            "rows_input": int(len(raw_df)),
-                            "rows_retained": int(len(prepared_df)),
-                        },
-                    )
-
-                stats.processed_events += 1
+                put_report_table_checkpoint(
+                    table_name=ddb_table,
+                    report_table=table_name,
+                    report_policy_version=REPORT_POLICY_VERSION,
+                    run_id=run_id,
+                    status="success",
+                    aws_region=cfg.aws_region,
+                    extra_attributes={
+                        "athena_database": athena_database,
+                        "athena_workgroup": athena_workgroup,
+                        "source_table": source_table,
+                        "base_table_name": base_table_name,
+                        "query_execution_id": result["query_execution_id"],
+                        "scanned_bytes": result["scanned_bytes"],
+                        "engine_execution_time_ms": result["engine_execution_time_ms"],
+                        "published_s3_uri": target_s3_uri,
+                    },
+                )
+                stats.refreshed_tables += 1
 
             except Exception as exc:
-                stats.failed_events += 1
+                stats.failed_tables += 1
                 logger.exception(
-                    "report_round_weather_impacts_event_failed",
-                    extra={"run_id": run_id, "event_id": event_id, "error": str(exc)},
+                    "report_round_weather_impacts_table_failed",
+                    extra={"run_id": run_id, "report_table": table_name, "error": str(exc)},
                 )
-                if not args.dry_run:
-                    try:
-                        put_report_checkpoint(
-                            table_name=ddb_table,
-                            event_id=event_id,
-                            report_policy_version=REPORT_POLICY_VERSION,
-                            run_id=run_id,
-                            status="failed",
-                            aws_region=cfg.aws_region,
-                            extra_attributes={
-                                "source_scored_key": event_object["key"],
-                                "scored_input_fingerprint": scored_input_fingerprint,
-                                "error_message": str(exc),
-                            },
-                        )
-                    except Exception:
-                        logger.exception(
-                            "report_round_weather_impacts_checkpoint_write_failed",
-                            extra={"run_id": run_id, "event_id": event_id},
-                        )
-
-        if not args.dry_run:
-            for table_name in REPORT_TABLES:
-                t_pub = time.perf_counter()
-                published_df = build_published_table(bucket=bucket, table_name=table_name)
-                if not published_df.empty:
-                    write_published_table(bucket=bucket, table_name=table_name, df=published_df)
-                stats.published_tables += 1
-                _log_phase_timing(
+                put_report_table_checkpoint(
+                    table_name=ddb_table,
+                    report_table=table_name,
+                    report_policy_version=REPORT_POLICY_VERSION,
                     run_id=run_id,
-                    phase="publish_table",
-                    started_at=t_pub,
-                    extra={"table_name": table_name, "rows": int(len(published_df))},
+                    status="failed",
+                    aws_region=cfg.aws_region,
+                    extra_attributes={
+                        "athena_database": athena_database,
+                        "athena_workgroup": athena_workgroup,
+                        "source_table": source_table,
+                        "base_table_name": base_table_name,
+                        "error_message": str(exc),
+                    },
                 )
 
-            put_report_run_summary(
-                table_name=ddb_table,
-                run_id=run_id,
-                stats=stats.to_dict(),
-                aws_region=cfg.aws_region,
-            )
+        put_report_run_summary(
+            table_name=ddb_table,
+            run_id=run_id,
+            stats={
+                **stats.to_dict(),
+                "athena_database": athena_database,
+                "athena_workgroup": athena_workgroup,
+                "source_table": source_table,
+                "base_table_name": base_table_name,
+                "report_tables_requested": selected_tables,
+            },
+            aws_region=cfg.aws_region,
+        )
 
-        summary = {"run_id": run_id, **stats.to_dict()}
+        summary = {"run_id": run_id, **stats.to_dict(), "selected_tables": selected_tables}
         logger.info("report_round_weather_impacts_summary", extra=summary)
         print({"report_round_weather_impacts_summary": summary})
-        return 0 if stats.failed_events == 0 else 2
+        return 0 if stats.failed_tables == 0 else 2
 
     except Exception as exc:
         logger.exception("report_round_weather_impacts_failed", extra={"run_id": run_id, "error": str(exc)})

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 import boto3
 
@@ -14,7 +14,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _ddb_resource(aws_region: Optional[str]):
+def _ddb_resource(aws_region: str | None):
     return boto3.resource("dynamodb", region_name=aws_region) if aws_region else boto3.resource("dynamodb")
 
 
@@ -43,40 +43,40 @@ def _to_dynamodb_safe(value: Any) -> Any:
     return value
 
 
-def get_report_checkpoint(
+def get_report_table_checkpoint(
     *,
     table_name: str,
-    event_id: int,
+    report_table: str,
     report_policy_version: str,
-    aws_region: Optional[str],
+    aws_region: str | None,
 ) -> dict[str, Any] | None:
     table = _ddb_resource(aws_region).Table(table_name)
     resp = table.get_item(
         Key={
             "pk": REPORT_CHECKPOINT_PK,
-            "sk": f"EVENT#{int(event_id)}#REPORT_POLICY#{report_policy_version}",
+            "sk": f"TABLE#{report_table}#REPORT_POLICY#{report_policy_version}",
         },
         ConsistentRead=False,
     )
     return resp.get("Item")
 
 
-def put_report_checkpoint(
+def put_report_table_checkpoint(
     *,
     table_name: str,
-    event_id: int,
+    report_table: str,
     report_policy_version: str,
     run_id: str,
     status: str,
-    aws_region: Optional[str],
+    aws_region: str | None,
     extra_attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     table = _ddb_resource(aws_region).Table(table_name)
     item = {
         "pk": REPORT_CHECKPOINT_PK,
-        "sk": f"EVENT#{int(event_id)}#REPORT_POLICY#{report_policy_version}",
+        "sk": f"TABLE#{report_table}#REPORT_POLICY#{report_policy_version}",
         "pipeline": PIPELINE_NAME,
-        "event_id": int(event_id),
+        "report_table": report_table,
         "report_policy_version": report_policy_version,
         "status": status,
         "last_run_id": run_id,
@@ -94,7 +94,7 @@ def put_report_run_summary(
     table_name: str,
     run_id: str,
     stats: dict[str, Any],
-    aws_region: Optional[str],
+    aws_region: str | None,
 ) -> dict[str, Any]:
     table = _ddb_resource(aws_region).Table(table_name)
     item = {
