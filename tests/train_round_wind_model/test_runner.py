@@ -29,7 +29,10 @@ def test_main_skips_when_checkpoint_exists(monkeypatch):
     monkeypatch.setattr(
         runner,
         "load_model_input_round_dataframe",
-        lambda **kwargs: (pd.DataFrame([{"row_hash_sha256": "a"}]), [{"key": "k1", "etag": "e1", "size": 1, "last_modified": "x"}]),
+        lambda **kwargs: (
+            pd.DataFrame([{"row_hash_sha256": "a"}]),
+            [{"key": "k1", "etag": "e1", "size": 1, "last_modified": "x"}],
+        ),
     )
     monkeypatch.setattr(runner, "compute_dataset_fingerprint", lambda objects: "dataset-fp")
     monkeypatch.setattr(runner, "compute_training_request_fingerprint", lambda **kwargs: "train-fp")
@@ -83,16 +86,17 @@ def test_main_trains_and_writes(monkeypatch):
             "best_iteration": 123,
             "input_rows": 100,
             "rows_after_weather_filter": 90,
+            "rows_after_hole_filter": 84,
             "rows_after_numeric_not_null_filter": 80,
             "train_rows": 50,
             "valid_rows": 15,
             "test_rows": 15,
         },
         training_manifest={
-            "model_name": "round_one_stage_catboost",
-            "model_version": "v1",
-            "feature_cols": ["player_rating"],
-            "categorical_features": ["course_id"],
+            "model_name": "round_one_stage_catboost_monotone",
+            "model_version": "v4",
+            "feature_cols": ["player_rating", "round_wind_speed_mps_mean", "precip_during_round_flag"],
+            "categorical_features": ["course_id", "division"],
         },
         feature_importance_rows=[{"feature": "player_rating", "importance": 10.0}],
     )

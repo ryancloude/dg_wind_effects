@@ -15,21 +15,22 @@ from train_round_wind_model.models import (
     CATBOOST_PARAMS,
     CATEGORICAL_FEATURES,
     EARLY_STOPPING_ROUNDS,
+    FEATURE_COLUMNS,
+    MIN_HOLES_PLAYED,
     MODEL_NAME,
     MODEL_VERSION,
     NUMERIC_FEATURES,
     RANDOM_STATE,
+    REFERENCE_PRECIP_FLAG,
+    REFERENCE_TEMPERATURE_C,
+    REFERENCE_WIND_GUST_MPH,
+    REFERENCE_WIND_SPEED_MPH,
     REQUIRE_WEATHER_AVAILABLE,
     REQUIRED_INPUT_COLS,
     TARGET_COL,
     TEST_SIZE,
     VALID_SIZE_WITHIN_TRAIN,
 )
-
-WIND_SPEED_REFERENCE_MPH = 2.0
-WIND_GUST_REFERENCE_MPH = 3.0
-TEMPERATURE_REFERENCE_C = 12.0
-PRECIP_REFERENCE_MM = 0.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def compute_training_request_fingerprint(
         "numeric_features": list(NUMERIC_FEATURES),
         "categorical_features": list(CATEGORICAL_FEATURES),
         "require_weather_available": REQUIRE_WEATHER_AVAILABLE,
+        "min_holes_played": MIN_HOLES_PLAYED,
         "test_size": TEST_SIZE,
         "valid_size_within_train": VALID_SIZE_WITHIN_TRAIN,
         "random_state": RANDOM_STATE,
@@ -106,15 +108,35 @@ def prepare_training_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str
 
     if REQUIRE_WEATHER_AVAILABLE:
         df = df[df["weather_available_flag"] == True].copy()  # noqa: E712
-
     stats["rows_after_weather_filter"] = int(len(df))
 
-    numeric_cols = list(NUMERIC_FEATURES) + [TARGET_COL]
-    for col in numeric_cols:
+    df["hole_count"] = pd.to_numeric(df["hole_count"], errors="coerce")
+    df = df[df["hole_count"] >= MIN_HOLES_PLAYED].copy()
+    stats["rows_after_hole_filter"] = int(len(df))
+
+    raw_numeric_required = [
+        TARGET_COL,
+        "player_rating",
+        "round_number",
+        "hole_count",
+        "round_total_hole_length",
+        "round_avg_hole_length",
+        "round_total_par",
+        "round_avg_hole_par",
+        "round_length_over_par",
+        "round_wind_speed_mps_mean",
+        "round_wind_gust_mps_mean",
+        "round_temp_c_mean",
+        "round_precip_mm_sum",
+    ]
+
+    for col in raw_numeric_required:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df = df.dropna(subset=numeric_cols).copy()
+    df = df.dropna(subset=raw_numeric_required).copy()
     stats["rows_after_numeric_not_null_filter"] = int(len(df))
+
+    df["precip_during_round_flag"] = df["round_precip_mm_sum"].fillna(0.0).gt(0.0).astype(int)
 
     for col in CATEGORICAL_FEATURES:
         df[col] = df[col].astype("string").fillna("__MISSING__").astype(str)
@@ -139,7 +161,7 @@ def _prepare_split_frames(
         random_state=RANDOM_STATE,
     )
 
-    feature_cols = list(NUMERIC_FEATURES) + list(CATEGORICAL_FEATURES)
+    feature_cols = list(FEATURE_COLUMNS)
 
     for col in CATEGORICAL_FEATURES:
         train_df[col] = train_df[col].astype("string").fillna("__MISSING__").astype(str)
@@ -163,9 +185,6 @@ def train_round_model(
     event_ids: list[int] | None = None,
 ) -> TrainingResult:
     df, filter_stats = prepare_training_dataframe(df)
-
-    pressure_reference_hpa = float(df["round_pressure_hpa_mean"].median())
-    humidity_reference_pct = float(df["round_humidity_pct_mean"].median())
 
     train_df, valid_df, test_df, feature_cols, cat_idx = _prepare_split_frames(df)
 
@@ -199,6 +218,7 @@ def train_round_model(
         "best_iteration": int(getattr(model, "best_iteration_", -1)),
         "input_rows": int(filter_stats["input_rows"]),
         "rows_after_weather_filter": int(filter_stats["rows_after_weather_filter"]),
+        "rows_after_hole_filter": int(filter_stats["rows_after_hole_filter"]),
         "rows_after_numeric_not_null_filter": int(filter_stats["rows_after_numeric_not_null_filter"]),
         "train_rows": int(len(train_df)),
         "valid_rows": int(len(valid_df)),
@@ -229,17 +249,16 @@ def train_round_model(
         "source_key_count": int(source_key_count),
         "event_ids": sorted(int(x) for x in event_ids) if event_ids else None,
         "require_weather_available": REQUIRE_WEATHER_AVAILABLE,
+        "min_holes_played": MIN_HOLES_PLAYED,
         "test_size": TEST_SIZE,
         "valid_size_within_train": VALID_SIZE_WITHIN_TRAIN,
         "random_state": RANDOM_STATE,
         "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
         "catboost_params": CATBOOST_PARAMS,
-        "wind_speed_reference_mph": WIND_SPEED_REFERENCE_MPH,
-        "wind_gust_reference_mph": WIND_GUST_REFERENCE_MPH,
-        "temperature_reference_c": TEMPERATURE_REFERENCE_C,
-        "precip_reference_mm": PRECIP_REFERENCE_MM,
-        "pressure_reference_hpa": pressure_reference_hpa,
-        "humidity_reference_pct": humidity_reference_pct,
+        "wind_speed_reference_mph": REFERENCE_WIND_SPEED_MPH,
+        "wind_gust_reference_mph": REFERENCE_WIND_GUST_MPH,
+        "temperature_reference_c": REFERENCE_TEMPERATURE_C,
+        "precip_reference_flag": REFERENCE_PRECIP_FLAG,
         **metrics,
     }
 
@@ -249,4 +268,5 @@ def train_round_model(
         training_manifest=training_manifest,
         feature_importance_rows=feature_importance_rows,
     )
+
 

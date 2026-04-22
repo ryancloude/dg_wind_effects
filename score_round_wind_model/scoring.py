@@ -22,32 +22,6 @@ def _stable_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _wind_speed_bucket(speed_mps: float | None) -> str:
-    if speed_mps is None:
-        return "unknown"
-    if speed_mps < 2.0:
-        return "calm"
-    if speed_mps < 5.0:
-        return "light"
-    if speed_mps < 8.0:
-        return "moderate"
-    if speed_mps < 12.0:
-        return "strong"
-    return "very_strong"
-
-
-def _wind_gust_bucket(speed_mps: float | None) -> str:
-    if speed_mps is None:
-        return "unknown"
-    if speed_mps < 3.0:
-        return "low"
-    if speed_mps < 6.0:
-        return "mild"
-    if speed_mps < 10.0:
-        return "high"
-    return "very_high"
-
-
 def compute_scoring_request_fingerprint(
     *,
     event_object: dict[str, Any],
@@ -71,6 +45,8 @@ def prepare_scoring_dataframe(
     df: pd.DataFrame,
     feature_columns: list[str],
     categorical_feature_columns: list[str],
+    require_weather_available: bool,
+    min_holes_played: int,
 ) -> pd.DataFrame:
     if df.empty:
         raise ValueError("No rows found for scoring.")
@@ -80,6 +56,21 @@ def prepare_scoring_dataframe(
         raise ValueError(f"Scoring input is missing required columns: {missing_cols}")
 
     score_df = df.copy()
+
+    score_df["hole_count"] = pd.to_numeric(score_df["hole_count"], errors="coerce")
+    score_df["round_precip_mm_sum"] = pd.to_numeric(score_df["round_precip_mm_sum"], errors="coerce")
+
+    if require_weather_available and "weather_available_flag" in score_df.columns:
+        score_df = score_df[score_df["weather_available_flag"] == True].copy()  # noqa: E712
+
+    score_df = score_df[score_df["hole_count"] >= int(min_holes_played)].copy()
+
+    score_df["precip_during_round_flag"] = (
+        score_df["round_precip_mm_sum"]
+        .fillna(0.0)
+        .gt(0.0)
+        .astype(int)
+    )
 
     for col in feature_columns:
         if col not in score_df.columns:
@@ -120,15 +111,8 @@ def _build_wind_reference_df(
     wind_gust_reference_mph: float,
 ) -> pd.DataFrame:
     out = df.copy()
-    wind_speed_mps = wind_speed_reference_mph * MPH_TO_MPS
-    wind_gust_mps = wind_gust_reference_mph * MPH_TO_MPS
-
-    out["round_wind_speed_mps_mean"] = wind_speed_mps
-    out["round_wind_speed_mps_max"] = wind_speed_mps
-    out["round_wind_gust_mps_mean"] = wind_gust_mps
-    out["round_wind_gust_mps_max"] = wind_gust_mps
-    out["round_wind_speed_bucket"] = _wind_speed_bucket(wind_speed_mps)
-    out["round_wind_gust_bucket"] = _wind_gust_bucket(wind_gust_mps)
+    out["round_wind_speed_mps_mean"] = float(wind_speed_reference_mph) * MPH_TO_MPS
+    out["round_wind_gust_mps_mean"] = float(wind_gust_reference_mph) * MPH_TO_MPS
     return out
 
 
@@ -142,15 +126,23 @@ def _build_temperature_reference_df(
     return out
 
 
+def _build_precip_reference_df(
+    df: pd.DataFrame,
+    *,
+    precip_reference_flag: int,
+) -> pd.DataFrame:
+    out = df.copy()
+    out["precip_during_round_flag"] = int(precip_reference_flag)
+    return out
+
+
 def _build_total_weather_reference_df(
     df: pd.DataFrame,
     *,
     wind_speed_reference_mph: float,
     wind_gust_reference_mph: float,
     temperature_reference_c: float,
-    precip_reference_mm: float,
-    pressure_reference_hpa: float,
-    humidity_reference_pct: float,
+    precip_reference_flag: int,
 ) -> pd.DataFrame:
     out = _build_wind_reference_df(
         df,
@@ -158,10 +150,7 @@ def _build_total_weather_reference_df(
         wind_gust_reference_mph=wind_gust_reference_mph,
     )
     out["round_temp_c_mean"] = float(temperature_reference_c)
-    out["round_precip_mm_sum"] = float(precip_reference_mm)
-    out["round_precip_mm_mean"] = float(precip_reference_mm)
-    out["round_pressure_hpa_mean"] = float(pressure_reference_hpa)
-    out["round_humidity_pct_mean"] = float(humidity_reference_pct)
+    out["precip_during_round_flag"] = int(precip_reference_flag)
     return out
 
 
@@ -182,6 +171,8 @@ def score_round_rows(
         df=df,
         feature_columns=feature_columns,
         categorical_feature_columns=categorical_feature_columns,
+        require_weather_available=bool(training_manifest.get("require_weather_available", True)),
+        min_holes_played=int(training_manifest.get("min_holes_played", 0)),
     )
 
     actual_pool = _prepare_pool(
@@ -214,14 +205,23 @@ def score_round_rows(
     )
     temperature_reference_pred = model.predict(temperature_reference_pool)
 
+    precip_reference_df = _build_precip_reference_df(
+        score_df,
+        precip_reference_flag=int(training_manifest["precip_reference_flag"]),
+    )
+    precip_reference_pool = _prepare_pool(
+        df=precip_reference_df,
+        feature_columns=feature_columns,
+        categorical_feature_columns=categorical_feature_columns,
+    )
+    precip_reference_pred = model.predict(precip_reference_pool)
+
     total_weather_reference_df = _build_total_weather_reference_df(
         score_df,
         wind_speed_reference_mph=float(training_manifest["wind_speed_reference_mph"]),
         wind_gust_reference_mph=float(training_manifest["wind_gust_reference_mph"]),
         temperature_reference_c=float(training_manifest["temperature_reference_c"]),
-        precip_reference_mm=float(training_manifest["precip_reference_mm"]),
-        pressure_reference_hpa=float(training_manifest["pressure_reference_hpa"]),
-        humidity_reference_pct=float(training_manifest["humidity_reference_pct"]),
+        precip_reference_flag=int(training_manifest["precip_reference_flag"]),
     )
     total_weather_reference_pool = _prepare_pool(
         df=total_weather_reference_df,
@@ -234,6 +234,7 @@ def score_round_rows(
     scored_df["predicted_round_strokes"] = actual_pred
     scored_df["predicted_round_strokes_wind_reference"] = wind_reference_pred
     scored_df["predicted_round_strokes_temperature_reference"] = temperature_reference_pred
+    scored_df["predicted_round_strokes_precip_reference"] = precip_reference_pred
     scored_df["predicted_round_strokes_total_weather_reference"] = total_weather_reference_pred
 
     scored_df["estimated_wind_impact_strokes"] = (
@@ -241,6 +242,9 @@ def score_round_rows(
     )
     scored_df["estimated_temperature_impact_strokes"] = (
         scored_df["predicted_round_strokes"] - scored_df["predicted_round_strokes_temperature_reference"]
+    )
+    scored_df["estimated_precip_impact_strokes"] = (
+        scored_df["predicted_round_strokes"] - scored_df["predicted_round_strokes_precip_reference"]
     )
     scored_df["estimated_total_weather_impact_strokes"] = (
         scored_df["predicted_round_strokes"] - scored_df["predicted_round_strokes_total_weather_reference"]
@@ -262,9 +266,7 @@ def score_round_rows(
         "wind_speed_reference_mph": float(training_manifest["wind_speed_reference_mph"]),
         "wind_gust_reference_mph": float(training_manifest["wind_gust_reference_mph"]),
         "temperature_reference_c": float(training_manifest["temperature_reference_c"]),
-        "precip_reference_mm": float(training_manifest["precip_reference_mm"]),
-        "pressure_reference_hpa": float(training_manifest["pressure_reference_hpa"]),
-        "humidity_reference_pct": float(training_manifest["humidity_reference_pct"]),
+        "precip_reference_flag": int(training_manifest["precip_reference_flag"]),
         "rows_scored": int(len(scored_df)),
     }
 

@@ -26,16 +26,9 @@ def _row(**overrides):
         "round_avg_hole_par": 3.33,
         "round_length_over_par": 150.0,
         "round_wind_speed_mps_mean": 4.2,
-        "round_wind_speed_mps_max": 5.1,
         "round_wind_gust_mps_mean": 6.0,
-        "round_wind_gust_mps_max": 7.4,
         "round_temp_c_mean": 18.0,
         "round_precip_mm_sum": 0.0,
-        "round_precip_mm_mean": 0.0,
-        "round_pressure_hpa_mean": 1012.0,
-        "round_humidity_pct_mean": 61.0,
-        "round_wind_speed_bucket": "light",
-        "round_wind_gust_bucket": "mild",
         "row_hash_sha256": "abc",
     }
     row.update(overrides)
@@ -62,19 +55,39 @@ def test_compute_training_request_fingerprint_deterministic():
     assert fp1 == fp2
 
 
-def test_prepare_training_dataframe_filters_missing_numeric_rows():
+def test_prepare_training_dataframe_filters_weather_holes_and_missing_numeric_rows():
     df = pd.DataFrame(
         [
-            _row(player_key="P1"),
-            _row(player_key="P2", player_rating=None),
+            _row(player_key="P1", round_precip_mm_sum=0.0),
+            _row(player_key="P2", round_precip_mm_sum=1.5),
             _row(player_key="P3", weather_available_flag=False),
+            _row(player_key="P4", hole_count=9),
+            _row(player_key="P5", player_rating=None),
         ]
     )
 
     out_df, stats = prepare_training_dataframe(df)
 
-    assert len(out_df) == 1
-    assert stats["input_rows"] == 3
-    assert stats["rows_after_weather_filter"] == 2
-    assert stats["rows_after_numeric_not_null_filter"] == 1
+    assert len(out_df) == 2
+    assert stats["input_rows"] == 5
+    assert stats["rows_after_weather_filter"] == 4
+    assert stats["rows_after_hole_filter"] == 3
+    assert stats["rows_after_numeric_not_null_filter"] == 2
 
+    by_player = out_df.set_index("player_key")
+    assert by_player.loc["P1", "precip_during_round_flag"] == 0
+    assert by_player.loc["P2", "precip_during_round_flag"] == 1
+
+
+def test_prepare_training_dataframe_casts_categorical_features_to_strings():
+    df = pd.DataFrame(
+        [
+            _row(player_key="P1", course_id=101, division="MA3"),
+            _row(player_key="P2", course_id=102, division="FPO"),
+        ]
+    )
+
+    out_df, _ = prepare_training_dataframe(df)
+
+    assert out_df["course_id"].map(type).eq(str).all()
+    assert out_df["division"].map(type).eq(str).all()

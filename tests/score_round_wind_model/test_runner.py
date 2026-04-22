@@ -76,7 +76,7 @@ def test_runner_scores_and_writes(monkeypatch):
         lambda **kwargs: {
             "artifact_prefix": "artifacts/prefix/",
             "model": FakeModel(),
-            "training_manifest": {"model_name": "round_one_stage_catboost", "model_version": "v1"},
+            "training_manifest": {"model_name": "round_one_stage_catboost_monotone", "model_version": "v4"},
             "feature_columns": [],
             "categorical_feature_columns": [],
         },
@@ -98,7 +98,7 @@ def test_runner_scores_and_writes(monkeypatch):
         "score_round_rows",
         lambda **kwargs: ScoringResult(
             scored_df=pd.DataFrame([{"event_year": 2026, "tourn_id": 90008, "round_number": 1, "player_key": "P1"}]),
-            scoring_manifest={"model_name": "round_one_stage_catboost", "model_version": "v1"},
+            scoring_manifest={"model_name": "round_one_stage_catboost_monotone", "model_version": "v4"},
         ),
     )
     monkeypatch.setattr(runner, "overwrite_event_scored_rounds", lambda **kwargs: "scored_rounds.parquet")
