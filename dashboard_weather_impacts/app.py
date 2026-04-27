@@ -4,9 +4,10 @@ import streamlit as st
 
 from dashboard_weather_impacts.config import load_dashboard_config
 from dashboard_weather_impacts.data_access import load_page_datasets
-from dashboard_weather_impacts.filters import empty_filters, render_global_filters
+from dashboard_weather_impacts.filters import empty_filters
 from dashboard_weather_impacts.pages.event_explorer import render_event_explorer
 from dashboard_weather_impacts.pages.geography import render_geography
+from dashboard_weather_impacts.pages.methodology import render_methodology
 from dashboard_weather_impacts.pages.overview import render_overview
 
 
@@ -104,6 +105,10 @@ def _run_event_explorer():
     render_event_explorer(empty_filters(), datasets, config)
 
 
+def _run_methodology():
+    render_methodology()
+
+
 def main():
     st.set_page_config(
         page_title="Disc Golf Weather Impact Dashboard",
@@ -124,6 +129,7 @@ def main():
             st.Page(_run_overview, title="Overview", default=True),
             st.Page(_run_geography, title="Geography"),
             st.Page(_run_event_explorer, title="Event Explorer"),
+            st.Page(_run_methodology, title="Methodology"),
         ],
         position="sidebar",
     )

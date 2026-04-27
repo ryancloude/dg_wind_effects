@@ -107,7 +107,7 @@ def test_build_report_ctas_sql_for_weather_by_state_uses_month_grain():
     assert "avg_estimated_wind_impact_strokes" in sql.lower()
 
 
-def test_build_report_ctas_sql_for_weather_by_event_includes_gust_metric():
+def test_build_report_ctas_sql_for_weather_by_event_includes_dates_and_gust_metric():
     sql = build_report_ctas_sql(
         database="pdga_analytics",
         base_table_name="reporting_base_rounds",
@@ -116,6 +116,8 @@ def test_build_report_ctas_sql_for_weather_by_event_includes_gust_metric():
     )
 
     assert "CREATE TABLE pdga_analytics.weather_by_event" in sql
+    assert "event_start_date" in sql
+    assert "event_end_date" in sql
     assert "AVG(observed_wind_gust_mph) AS avg_observed_wind_gust_mph" in sql
     assert "AVG(estimated_total_weather_impact_strokes)" in sql
 

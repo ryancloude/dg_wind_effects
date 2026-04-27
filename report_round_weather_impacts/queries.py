@@ -545,6 +545,7 @@ SELECT
   event_city,
   state,
   event_start_date,
+  event_end_date,
   COUNT(*) AS rounds_scored,
   COUNT(DISTINCT player_key) AS players_scored,
   AVG(observed_wind_mph) AS avg_observed_wind_mph,
@@ -557,7 +558,7 @@ SELECT
   AVG(estimated_temperature_impact_strokes) AS avg_estimated_temperature_impact_strokes,
   AVG(estimated_total_weather_impact_strokes) AS avg_estimated_total_weather_impact_strokes
 FROM {source}
-GROUP BY 1,2,3,4,5,6
+GROUP BY 1,2,3,4,5,6,7
 """.strip()
         return _ctas_sql(database=database, table_name=report_table_name, external_location=external_location, select_sql=select_sql)
 

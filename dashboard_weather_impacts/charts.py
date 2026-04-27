@@ -12,6 +12,7 @@ _GRID = "#E8E0D3"
 _TEXT = "#2F3441"
 _MUTED = "#5B6170"
 _SECONDARY = "#2563EB"
+_TERTIARY = "#0F766E"
 
 
 def effect_distribution_chart(df: pd.DataFrame, *, title: str, metric_label: str):
@@ -167,8 +168,62 @@ def overview_wind_impact_points_chart(df: pd.DataFrame, *, bucket_metric: str):
     return fig
 
 
+def _event_round_summary(df: pd.DataFrame) -> pd.DataFrame:
+    plot_df = df.copy()
+
+    if plot_df.empty:
+        return plot_df
+
+    grouped_rows: list[dict[str, object]] = []
+
+    for round_number, group in plot_df.groupby("round_number", sort=True):
+        rounds_weight = (
+            pd.to_numeric(group["rounds_scored"], errors="coerce")
+            if "rounds_scored" in group.columns
+            else None
+        )
+
+        def weighted_avg(col: str) -> float | None:
+            if col not in group.columns:
+                return None
+
+            values = pd.to_numeric(group[col], errors="coerce")
+            valid = values.notna()
+
+            if not valid.any():
+                return None
+
+            if rounds_weight is not None:
+                weights = rounds_weight[valid]
+                vals = values[valid]
+                if weights.notna().any() and float(weights.fillna(0).sum()) > 0:
+                    return float((vals * weights.fillna(0)).sum() / weights.fillna(0).sum())
+
+            return float(values[valid].mean())
+
+        round_date = ""
+        if "round_date" in group.columns:
+            non_null_dates = [str(x).strip() for x in group["round_date"].tolist() if str(x).strip()]
+            if non_null_dates:
+                round_date = non_null_dates[0]
+
+        grouped_rows.append(
+            {
+                "round_number": int(round_number),
+                "round_date": round_date,
+                "avg_estimated_wind_impact_strokes": weighted_avg("avg_estimated_wind_impact_strokes"),
+                "avg_estimated_total_weather_impact_strokes": weighted_avg("avg_estimated_total_weather_impact_strokes"),
+                "avg_observed_wind_mph": weighted_avg("avg_observed_wind_mph"),
+                "avg_observed_wind_gust_mph": weighted_avg("avg_observed_wind_gust_mph"),
+                "avg_observed_temp_f": weighted_avg("avg_observed_temp_f"),
+            }
+        )
+
+    return pd.DataFrame(grouped_rows).sort_values("round_number").reset_index(drop=True)
+
+
 def event_round_impact_chart(df: pd.DataFrame):
-    plot_df = df.sort_values("round_number").copy()
+    plot_df = _event_round_summary(df)
 
     fig = go.Figure()
 
@@ -179,9 +234,11 @@ def event_round_impact_chart(df: pd.DataFrame):
             mode="lines+markers",
             name="Avg Wind Added Strokes",
             line=dict(color=_ACCENT, width=3),
-            marker=dict(size=10, color=_ACCENT, line=dict(color="white", width=2)),
+            marker=dict(size=16, color=_ACCENT, line=dict(color="white", width=2.5)),
+            customdata=plot_df[["round_date"]] if "round_date" in plot_df.columns else None,
             hovertemplate=(
                 "Round %{x}<br>"
+                "Round Date: %{customdata[0]}<br>"
                 "Avg Wind Added Strokes: %{y:.2f}<extra></extra>"
             ),
         )
@@ -194,9 +251,11 @@ def event_round_impact_chart(df: pd.DataFrame):
             mode="lines+markers",
             name="Avg Total Weather Added Strokes",
             line=dict(color=_SECONDARY, width=3),
-            marker=dict(size=10, color=_SECONDARY, line=dict(color="white", width=2)),
+            marker=dict(size=16, color=_SECONDARY, line=dict(color="white", width=2.5)),
+            customdata=plot_df[["round_date"]] if "round_date" in plot_df.columns else None,
             hovertemplate=(
                 "Round %{x}<br>"
+                "Round Date: %{customdata[0]}<br>"
                 "Avg Total Weather Added Strokes: %{y:.2f}<extra></extra>"
             ),
         )
@@ -207,7 +266,7 @@ def event_round_impact_chart(df: pd.DataFrame):
     fig.update_layout(
         title=dict(
             text="Round-by-Round Weather Impact",
-            font=dict(size=22, color=_TEXT),
+            font=dict(size=20, color=_TEXT),
             x=0.0,
             xanchor="left",
         ),
@@ -216,19 +275,23 @@ def event_round_impact_chart(df: pd.DataFrame):
         plot_bgcolor="white",
         paper_bgcolor="white",
         font=dict(color=_TEXT),
-        margin=dict(l=20, r=20, t=72, b=40),
+        margin=dict(l=20, r=20, t=92, b=45),
         legend=dict(
             orientation="h",
             yanchor="bottom",
             y=1.02,
             xanchor="left",
             x=0.0,
+            font=dict(size=12),
+            bgcolor="rgba(0,0,0,0)",
         ),
+        dragmode=False,
     )
 
     fig.update_yaxes(
         gridcolor=_GRID,
         zeroline=False,
+        fixedrange=True,
         title_font=dict(color=_MUTED, size=15),
         tickfont=dict(color=_MUTED, size=13),
     )
@@ -236,8 +299,92 @@ def event_round_impact_chart(df: pd.DataFrame):
     fig.update_xaxes(
         dtick=1,
         showgrid=False,
+        fixedrange=True,
         title_font=dict(color=_MUTED, size=15),
         tickfont=dict(color=_MUTED, size=13),
+    )
+
+    return fig
+
+
+def event_round_conditions_chart(df: pd.DataFrame, *, metric_key: str):
+    plot_df = _event_round_summary(df)
+
+    metric_config = {
+        "wind_speed": {
+            "column": "avg_observed_wind_mph",
+            "title": "Round-by-Round Wind Speed",
+            "label": "Avg Wind (mph)",
+            "yaxis_title": "Wind Speed (mph)",
+            "color": _ACCENT,
+            "format": "%{y:.1f} mph",
+        },
+        "wind_gust": {
+            "column": "avg_observed_wind_gust_mph",
+            "title": "Round-by-Round Wind Gust",
+            "label": "Avg Wind Gust (mph)",
+            "yaxis_title": "Wind Gust (mph)",
+            "color": _SECONDARY,
+            "format": "%{y:.1f} mph",
+        },
+        "temperature": {
+            "column": "avg_observed_temp_f",
+            "title": "Round-by-Round Temperature",
+            "label": "Avg Temperature (F)",
+            "yaxis_title": "Temperature (F)",
+            "color": _TERTIARY,
+            "format": "%{y:.1f} F",
+        },
+    }[metric_key]
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=plot_df["round_number"],
+            y=plot_df[metric_config["column"]],
+            mode="lines+markers",
+            name=metric_config["label"],
+            line=dict(color=metric_config["color"], width=3),
+            marker=dict(size=16, color=metric_config["color"], line=dict(color="white", width=2.5)),
+            customdata=plot_df[["round_date"]] if "round_date" in plot_df.columns else None,
+            hovertemplate=(
+                "Round %{x}<br>"
+                "Round Date: %{customdata[0]}<br>"
+                f"{metric_config['label']}: {metric_config['format']}<extra></extra>"
+            ),
+            showlegend=False,
+        )
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=metric_config["title"],
+            font=dict(size=20, color=_TEXT),
+            x=0.0,
+            xanchor="left",
+        ),
+        xaxis=dict(
+            title="Round Number",
+            dtick=1,
+            showgrid=False,
+            fixedrange=True,
+            title_font=dict(color=_MUTED, size=15),
+            tickfont=dict(color=_MUTED, size=13),
+        ),
+        yaxis=dict(
+            title=metric_config["yaxis_title"],
+            gridcolor=_GRID,
+            zeroline=False,
+            fixedrange=True,
+            title_font=dict(color=_MUTED, size=15),
+            tickfont=dict(color=_MUTED, size=13),
+        ),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(color=_TEXT),
+        margin=dict(l=20, r=20, t=92, b=45),
+        dragmode=False,
     )
 
     return fig
