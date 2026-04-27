@@ -35,8 +35,8 @@ def _row(**overrides):
         "tourn_id": 90008,
         "round_number": 1,
         "player_key": "P1",
-        "course_id": "101",
-        "layout_id": "201",
+        "course_id": 101,
+        "layout_id": 201,
         "division": "MA3",
         "player_rating": 915,
         "actual_round_strokes": 57,
@@ -107,7 +107,7 @@ def test_prepare_scoring_dataframe_filters_weather_holes_and_derives_precip_flag
     assert out_df["division"].map(type).eq(str).all()
 
 
-def test_score_round_rows_adds_impact_columns():
+def test_score_round_rows_adds_impact_columns_and_normalizes_output_string_columns():
     df = pd.DataFrame([_row()])
 
     manifest = {
@@ -176,3 +176,9 @@ def test_score_round_rows_adds_impact_columns():
     assert row["estimated_temperature_impact_strokes"] == 0.75
     assert row["estimated_precip_impact_strokes"] == 0.25
     assert row["estimated_total_weather_impact_strokes"] == 2.25
+
+    # Regression guard for the Athena schema issue.
+    assert row["course_id"] == "101"
+    assert row["layout_id"] == "201"
+    assert isinstance(row["course_id"], str)
+    assert isinstance(row["layout_id"], str)

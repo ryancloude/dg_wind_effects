@@ -76,7 +76,9 @@ def prepare_scoring_dataframe(
         if col not in score_df.columns:
             raise ValueError(f"Scoring dataframe is missing model feature column: {col}")
 
-    numeric_feature_cols = [c for c in feature_columns if c not in set(categorical_feature_columns)]
+    categorical_feature_set = set(categorical_feature_columns)
+    numeric_feature_cols = [c for c in feature_columns if c not in categorical_feature_set]
+
     for col in numeric_feature_cols:
         score_df[col] = pd.to_numeric(score_df[col], errors="coerce")
 
@@ -151,6 +153,23 @@ def _build_total_weather_reference_df(
     )
     out["round_temp_c_mean"] = float(temperature_reference_c)
     out["precip_during_round_flag"] = int(precip_reference_flag)
+    return out
+
+
+def _normalize_nullable_string_columns(
+    df: pd.DataFrame,
+    *,
+    columns: list[str],
+) -> pd.DataFrame:
+    out = df.copy()
+
+    for col in columns:
+        if col not in out.columns:
+            continue
+
+        as_string = out[col].astype("string")
+        out[col] = as_string.where(as_string.notna(), None).astype(object)
+
     return out
 
 
@@ -257,6 +276,37 @@ def score_round_rows(
     scored_df["scored_at_utc"] = scored_at_utc
     scored_df["scoring_request_fingerprint"] = scoring_request_fingerprint
     scored_df["model_artifact_prefix"] = model_artifact_prefix
+
+    # Keep the scored-rounds Parquet schema stable for Athena even when some of
+    # these columns are no longer model features and therefore would otherwise
+    # retain numeric types from upstream inputs.
+    scored_df = _normalize_nullable_string_columns(
+        scored_df,
+        columns=[
+            "player_key",
+            "player_name",
+            "division",
+            "event_name",
+            "event_city",
+            "event_state",
+            "event_start_date",
+            "event_end_date",
+            "round_date",
+            "course_id",
+            "course_name",
+            "layout_id",
+            "layout_name",
+            "round_wind_speed_bucket",
+            "round_wind_gust_bucket",
+            "model_name",
+            "model_version",
+            "training_request_fingerprint",
+            "scoring_run_id",
+            "scored_at_utc",
+            "scoring_request_fingerprint",
+            "model_artifact_prefix",
+        ],
+    )
 
     scoring_manifest = {
         "model_name": str(training_manifest["model_name"]),

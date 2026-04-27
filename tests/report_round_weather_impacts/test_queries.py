@@ -24,9 +24,74 @@ def test_build_reporting_base_ctas_sql_uses_source_table_and_location():
     assert "rating_band" in sql
     assert "temperature_band_f" in sql
     assert "state" in sql
+    assert "observed_wind_gust_mph" in sql
+    assert "'No Precipitation'" in sql
 
 
-def test_build_report_ctas_sql_for_weather_by_state_uses_base_table():
+def test_build_report_ctas_sql_for_weather_overview_matches_new_overview_page():
+    sql = build_report_ctas_sql(
+        database="pdga_analytics",
+        base_table_name="reporting_base_rounds",
+        report_table_name="weather_overview",
+        external_location="s3://bucket/gold/pdga/wind_effects/reports/published/weather_overview/",
+    )
+
+    assert "CREATE TABLE pdga_analytics.weather_overview" in sql
+    assert "reference_wind_mph" in sql
+    assert "reference_gust_mph" in sql
+    assert "reference_temp_f" in sql
+    assert "reference_precipitation" in sql
+    assert "rounds_tracked" in sql
+    assert "events_tracked" in sql
+    assert "avg_added_strokes_weather" in sql
+    assert "avg_added_strokes_wind" in sql
+    assert "avg_observed_wind_mph" in sql
+    assert "avg_observed_wind_gust_mph" in sql
+
+
+def test_build_report_ctas_sql_for_distribution_table_has_expected_bins():
+    sql = build_report_ctas_sql(
+        database="pdga_analytics",
+        base_table_name="reporting_base_rounds",
+        report_table_name="weather_impact_distribution",
+        external_location="s3://bucket/gold/pdga/wind_effects/reports/published/weather_impact_distribution/",
+    )
+
+    assert "CREATE TABLE pdga_analytics.weather_impact_distribution" in sql
+    assert "'total_added_strokes_weather'" in sql
+    assert "'added_strokes_wind'" in sql
+    assert "'observed_average_wind_speed'" in sql
+    assert "'observed_average_wind_gust_speed'" in sql
+    assert "'observed_temperature'" in sql
+    assert "'observed_precipitation'" in sql
+    assert "'< -1.0'" in sql
+    assert "'>= 4.0'" in sql
+    assert "'15+ mph'" in sql
+    assert "'25+ mph'" in sql
+    assert "share_of_rounds" in sql
+    assert "rounds_tracked" in sql
+
+
+def test_build_report_ctas_sql_for_weather_wind_impact_points_supports_speed_and_gust():
+    sql = build_report_ctas_sql(
+        database="pdga_analytics",
+        base_table_name="reporting_base_rounds",
+        report_table_name="weather_wind_impact_points",
+        external_location="s3://bucket/gold/pdga/wind_effects/reports/published/weather_wind_impact_points/",
+    )
+
+    assert "CREATE TABLE pdga_analytics.weather_wind_impact_points" in sql
+    assert "'wind_speed' AS bucket_metric" in sql
+    assert "'wind_gust' AS bucket_metric" in sql
+    assert "'0-3 mph'" in sql
+    assert "'15+ mph'" in sql
+    assert "'0-5 mph'" in sql
+    assert "'25+ mph'" in sql
+    assert "AVG(added_strokes_from_wind) AS avg_added_strokes_from_wind" in sql
+    assert "COUNT(*) AS rounds_tracked" in sql
+
+
+def test_build_report_ctas_sql_for_weather_by_state_uses_month_grain():
     sql = build_report_ctas_sql(
         database="pdga_analytics",
         base_table_name="reporting_base_rounds",
@@ -36,28 +101,26 @@ def test_build_report_ctas_sql_for_weather_by_state_uses_base_table():
 
     assert "CREATE TABLE pdga_analytics.weather_by_state" in sql
     assert "FROM pdga_analytics.reporting_base_rounds" in sql
-    assert "GROUP BY 1" in sql
+    assert "round_month" in sql
+    assert "round_month_label" in sql
+    assert "GROUP BY 1,2,3" in sql
     assert "avg_estimated_wind_impact_strokes" in sql.lower()
 
 
-def test_build_report_ctas_sql_for_distribution_table_has_bins():
+def test_build_report_ctas_sql_for_weather_by_event_includes_gust_metric():
     sql = build_report_ctas_sql(
         database="pdga_analytics",
         base_table_name="reporting_base_rounds",
-        report_table_name="weather_impact_distribution",
-        external_location="s3://bucket/gold/pdga/wind_effects/reports/published/weather_impact_distribution/",
+        report_table_name="weather_by_event",
+        external_location="s3://bucket/gold/pdga/wind_effects/reports/published/weather_by_event/",
     )
 
-    assert "CREATE TABLE pdga_analytics.weather_impact_distribution" in sql
-    assert "VALUES" in sql
-    assert "'< -3.0'" in sql
-    assert "'0.0 to 0.5'" in sql
-    assert "'>= 6.0'" in sql
-    assert "estimated_total_weather_impact_strokes" in sql
-    assert "rounds_scored" in sql
+    assert "CREATE TABLE pdga_analytics.weather_by_event" in sql
+    assert "AVG(observed_wind_gust_mph) AS avg_observed_wind_gust_mph" in sql
+    assert "AVG(estimated_total_weather_impact_strokes)" in sql
 
 
-def test_build_report_ctas_sql_for_event_round_includes_round_grain():
+def test_build_report_ctas_sql_for_event_round_includes_round_grain_and_gust():
     sql = build_report_ctas_sql(
         database="pdga_analytics",
         base_table_name="reporting_base_rounds",
@@ -68,3 +131,4 @@ def test_build_report_ctas_sql_for_event_round_includes_round_grain():
     assert "round_number" in sql
     assert "round_date" in sql
     assert "event_name" in sql
+    assert "AVG(observed_wind_gust_mph) AS avg_observed_wind_gust_mph" in sql
