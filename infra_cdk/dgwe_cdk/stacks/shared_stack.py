@@ -25,6 +25,7 @@ CONFIG_PARAMETER_VALUES: Final[dict[str, str]] = {
     "ATHENA_RESULTS_S3_URI": "",
     "ATHENA_SOURCE_SCORED_TABLE": "",
     "ATHENA_REPORTING_BASE_TABLE": "",
+    "PRODUCTION_TRAINING_REQUEST_FINGERPRINT": "",
 }
 
 
@@ -94,6 +95,7 @@ class PipelineSharedStack(Stack):
             "ATHENA_RESULTS_S3_URI": settings.athena_results_s3_uri,
             "ATHENA_SOURCE_SCORED_TABLE": settings.athena_source_scored_table,
             "ATHENA_REPORTING_BASE_TABLE": settings.athena_reporting_base_table,
+            "PRODUCTION_TRAINING_REQUEST_FINGERPRINT": settings.production_training_request_fingerprint,
         }
 
         parameters: dict[str, ssm.StringParameter] = {}

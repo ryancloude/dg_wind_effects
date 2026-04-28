@@ -251,6 +251,15 @@ class PipelineOrchestrationStack(Stack):
             .next(done)
         )
 
+    def _build_command(self, definition: PipelineJobDefinition) -> list[str]:
+        if definition.job_name == "score_round_wind_model":
+            return [
+                "--training-request-fingerprint",
+                self.settings.production_training_request_fingerprint,
+                *definition.default_command,
+            ]
+        return list(definition.default_command)
+
     def _ecs_step(self, job_name: str) -> tasks.EcsRunTask:
         job = self.jobs[job_name]
         definition: PipelineJobDefinition = job.definition
@@ -269,7 +278,7 @@ class PipelineOrchestrationStack(Stack):
             container_overrides=[
                 tasks.ContainerOverride(
                     container_definition=job.container,
-                    command=list(definition.default_command),
+                    command=self._build_command(definition),
                     environment=[
                         tasks.TaskEnvironmentVariable(
                             name="RUN_ID",

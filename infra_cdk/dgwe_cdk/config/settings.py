@@ -24,6 +24,7 @@ class PipelineSettings:
     athena_results_s3_uri: str
     athena_source_scored_table: str
     athena_reporting_base_table: str
+    production_training_request_fingerprint: str
 
     @property
     def stack_prefix(self) -> str:
@@ -110,5 +111,8 @@ class PipelineSettings:
             athena_reporting_base_table=resolve(
                 "ATHENA_REPORTING_BASE_TABLE",
                 "reporting_base_rounds",
+            ),
+            production_training_request_fingerprint=resolve(
+                "PRODUCTION_TRAINING_REQUEST_FINGERPRINT"
             ),
         )

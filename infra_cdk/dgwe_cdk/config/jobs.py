@@ -52,7 +52,7 @@ JOB_DEFINITIONS: Final[tuple[PipelineJobDefinition, ...]] = (
         cpu=512,
         memory_mib=1024,
         timeout_minutes=30,
-        default_command=("--incremental", "--log-level", "INFO"),
+        default_command=("--incremental", "--log-level", "INFO", "--sleep-base", "1"),
         env_keys=COMMON_WITH_GSI_ENV_KEYS,
     ),
     PipelineJobDefinition(
@@ -63,7 +63,7 @@ JOB_DEFINITIONS: Final[tuple[PipelineJobDefinition, ...]] = (
         cpu=512,
         memory_mib=1024,
         timeout_minutes=45,
-        default_command=("--log-level", "INFO"),
+        default_command=("--log-level", "INFO", "--sleep-base", "1", "--sleep-jitter", "1"),
         env_keys=COMMON_ENV_KEYS,
     ),
     PipelineJobDefinition(
