@@ -34,3 +34,6 @@ AGENTS.md
 # local exports
 wind_impact_analysis/notebook_exports/
 wind_impact_analysis/catboost_info/
+
+infra_cdk/cdk.out/
+infra_cdk/cdk.context.json
