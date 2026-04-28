@@ -17,13 +17,24 @@ def _to_parquet_bytes(rows: list[dict[str, Any]]) -> bytes:
     return buf.getvalue()
 
 
-def build_scored_round_output_key(*, event_year: int, event_id: int) -> str:
+def build_scored_round_partition_prefix(*, event_year: int, event_id: int) -> str:
     return (
         f"{SCORED_ROUNDS_PREFIX}"
         f"event_year={int(event_year)}/"
         f"tourn_id={int(event_id)}/"
+    )
+
+
+def build_scored_round_output_key(*, event_year: int, event_id: int) -> str:
+    return (
+        f"{build_scored_round_partition_prefix(event_year=event_year, event_id=event_id)}"
         "scored_rounds.parquet"
     )
+
+
+def build_scored_round_partition_location(*, bucket: str, event_year: int, event_id: int) -> str:
+    prefix = build_scored_round_partition_prefix(event_year=event_year, event_id=event_id)
+    return f"s3://{bucket}/{prefix}"
 
 
 def overwrite_event_scored_rounds(

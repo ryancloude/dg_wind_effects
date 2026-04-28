@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from score_round_wind_model.athena_io import register_scored_round_partition
 from score_round_wind_model.config import load_config
 from score_round_wind_model.dynamo_io import (
     get_score_checkpoint,
@@ -14,7 +15,10 @@ from score_round_wind_model.dynamo_io import (
 )
 from score_round_wind_model.gold_io import list_model_input_round_objects, load_event_dataframe
 from score_round_wind_model.model_io import load_model_bundle
-from score_round_wind_model.parquet_io import overwrite_event_scored_rounds
+from score_round_wind_model.parquet_io import (
+    build_scored_round_partition_location,
+    overwrite_event_scored_rounds,
+)
 from score_round_wind_model.scoring import compute_scoring_request_fingerprint, score_round_rows
 
 logger = logging.getLogger("score_round_wind_model")
@@ -27,6 +31,7 @@ class RunStats:
     skipped_unchanged_events: int = 0
     failed_events: int = 0
     rows_scored: int = 0
+    partitions_registered: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -35,6 +40,7 @@ class RunStats:
             "skipped_unchanged_events": self.skipped_unchanged_events,
             "failed_events": self.failed_events,
             "rows_scored": self.rows_scored,
+            "partitions_registered": self.partitions_registered,
         }
 
 
@@ -48,7 +54,7 @@ def parse_args():
     p.add_argument("--training-request-fingerprint", required=True, help="Explicit training request fingerprint to score with")
     p.add_argument("--event-ids", help="Optional comma-separated event IDs")
     p.add_argument("--bucket", help="Override S3 bucket")
-    p.add_argument("--ddb-table", help="Override DynamoDB table")
+    p.add_argument("--ddb-table", help="Override DDB table")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force-events", action="store_true")
     p.add_argument("--log-level", default="INFO")
@@ -189,11 +195,16 @@ def main() -> int:
                 scored_rows = result.scored_df.to_dict(orient="records")
 
                 scored_key = ""
+                partition_location = ""
+                athena_partition_result: dict | None = None
+
                 if not args.dry_run:
+                    event_year = int(result.scored_df["event_year"].iloc[0])
+
                     t_write = time.perf_counter()
                     scored_key = overwrite_event_scored_rounds(
                         bucket=bucket,
-                        event_year=int(result.scored_df["event_year"].iloc[0]),
+                        event_year=event_year,
                         event_id=event_id,
                         rows=scored_rows,
                     )
@@ -204,6 +215,36 @@ def main() -> int:
                         extra={"event_id": event_id, "scored_key": scored_key},
                     )
 
+                    partition_location = build_scored_round_partition_location(
+                        bucket=bucket,
+                        event_year=event_year,
+                        event_id=event_id,
+                    )
+
+                    t_partition = time.perf_counter()
+                    athena_partition_result = register_scored_round_partition(
+                        database=cfg.athena_database,
+                        table_name=cfg.athena_source_scored_table,
+                        workgroup=cfg.athena_workgroup,
+                        output_location=cfg.athena_results_s3_uri,
+                        aws_region=cfg.aws_region,
+                        event_year=event_year,
+                        event_id=event_id,
+                        partition_location=partition_location,
+                    )
+                    stats.partitions_registered += 1
+                    _log_phase_timing(
+                        run_id=run_id,
+                        phase="register_scored_round_partition",
+                        started_at=t_partition,
+                        extra={
+                            "event_id": event_id,
+                            "event_year": event_year,
+                            "partition_location": partition_location,
+                            "query_execution_id": athena_partition_result["query_execution_id"],
+                        },
+                    )
+
                     put_score_checkpoint(
                         table_name=ddb_table,
                         event_id=event_id,
@@ -212,13 +253,15 @@ def main() -> int:
                         status="success",
                         aws_region=cfg.aws_region,
                         extra_attributes={
-                            "event_year": int(result.scored_df["event_year"].iloc[0]),
+                            "event_year": event_year,
                             "rows_scored": int(len(result.scored_df)),
                             "scored_rounds_key": scored_key,
                             "model_name": str(result.scoring_manifest["model_name"]),
                             "model_version": str(result.scoring_manifest["model_version"]),
                             "model_artifact_prefix": model_bundle["artifact_prefix"],
                             "scoring_request_fingerprint": scoring_request_fingerprint,
+                            "athena_partition_location": partition_location,
+                            "athena_partition_query_execution_id": athena_partition_result["query_execution_id"],
                         },
                     )
 
@@ -232,6 +275,7 @@ def main() -> int:
                         "event_id": event_id,
                         "rows_scored": len(result.scored_df),
                         "scored_rounds_key": scored_key,
+                        "partition_location": partition_location,
                     },
                 )
 

@@ -25,7 +25,15 @@ def test_runner_skips_existing_success(monkeypatch):
     monkeypatch.setattr(
         runner,
         "load_config",
-        lambda: SimpleNamespace(s3_bucket="bucket", ddb_table="table", aws_region="us-east-1"),
+        lambda: SimpleNamespace(
+            s3_bucket="bucket",
+            ddb_table="table",
+            aws_region="us-east-1",
+            athena_database="pdga_analytics",
+            athena_workgroup="pdga-analytics",
+            athena_results_s3_uri="s3://athena-results/query-results/",
+            athena_source_scored_table="scored_rounds",
+        ),
     )
     monkeypatch.setattr(
         runner,
@@ -41,7 +49,12 @@ def test_runner_skips_existing_success(monkeypatch):
     monkeypatch.setattr(
         runner,
         "list_model_input_round_objects",
-        lambda **kwargs: [{"key": "gold/pdga/wind_effects/model_inputs_round/event_year=2026/tourn_id=90008/model_inputs_round.parquet", "etag": "e1", "size": 1, "last_modified": "x"}],
+        lambda **kwargs: [{
+            "key": "gold/pdga/wind_effects/model_inputs_round/event_year=2026/tourn_id=90008/model_inputs_round.parquet",
+            "etag": "e1",
+            "size": 1,
+            "last_modified": "x",
+        }],
     )
     monkeypatch.setattr(runner, "compute_scoring_request_fingerprint", lambda **kwargs: "score-fp")
     monkeypatch.setattr(
@@ -53,7 +66,7 @@ def test_runner_skips_existing_success(monkeypatch):
     assert runner.main() == 0
 
 
-def test_runner_scores_and_writes(monkeypatch):
+def test_runner_scores_writes_and_registers_partition(monkeypatch):
     args = SimpleNamespace(
         training_request_fingerprint="train-fp",
         event_ids=None,
@@ -68,7 +81,15 @@ def test_runner_scores_and_writes(monkeypatch):
     monkeypatch.setattr(
         runner,
         "load_config",
-        lambda: SimpleNamespace(s3_bucket="bucket", ddb_table="table", aws_region="us-east-1"),
+        lambda: SimpleNamespace(
+            s3_bucket="bucket",
+            ddb_table="table",
+            aws_region="us-east-1",
+            athena_database="pdga_analytics",
+            athena_workgroup="pdga-analytics",
+            athena_results_s3_uri="s3://athena-results/query-results/",
+            athena_source_scored_table="scored_rounds",
+        ),
     )
     monkeypatch.setattr(
         runner,
@@ -84,7 +105,12 @@ def test_runner_scores_and_writes(monkeypatch):
     monkeypatch.setattr(
         runner,
         "list_model_input_round_objects",
-        lambda **kwargs: [{"key": "gold/pdga/wind_effects/model_inputs_round/event_year=2026/tourn_id=90008/model_inputs_round.parquet", "etag": "e1", "size": 1, "last_modified": "x"}],
+        lambda **kwargs: [{
+            "key": "gold/pdga/wind_effects/model_inputs_round/event_year=2026/tourn_id=90008/model_inputs_round.parquet",
+            "etag": "e1",
+            "size": 1,
+            "last_modified": "x",
+        }],
     )
     monkeypatch.setattr(runner, "compute_scoring_request_fingerprint", lambda **kwargs: "score-fp")
     monkeypatch.setattr(runner, "get_score_checkpoint", lambda **kwargs: None)
@@ -102,6 +128,16 @@ def test_runner_scores_and_writes(monkeypatch):
         ),
     )
     monkeypatch.setattr(runner, "overwrite_event_scored_rounds", lambda **kwargs: "scored_rounds.parquet")
+    monkeypatch.setattr(
+        runner,
+        "build_scored_round_partition_location",
+        lambda **kwargs: "s3://bucket/gold/pdga/wind_effects/scored_rounds/event_year=2026/tourn_id=90008/",
+    )
+    monkeypatch.setattr(
+        runner,
+        "register_scored_round_partition",
+        lambda **kwargs: {"query_execution_id": "qe-123"},
+    )
 
     checkpoint_calls = []
     summary_calls = []
@@ -112,3 +148,8 @@ def test_runner_scores_and_writes(monkeypatch):
     assert runner.main() == 0
     assert len(checkpoint_calls) == 1
     assert len(summary_calls) == 1
+    assert checkpoint_calls[0]["extra_attributes"]["athena_partition_location"] == (
+        "s3://bucket/gold/pdga/wind_effects/scored_rounds/event_year=2026/tourn_id=90008/"
+    )
+    assert checkpoint_calls[0]["extra_attributes"]["athena_partition_query_execution_id"] == "qe-123"
+    assert summary_calls[0]["stats"]["partitions_registered"] == 1

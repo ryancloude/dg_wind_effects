@@ -141,7 +141,8 @@ JOB_DEFINITIONS: Final[tuple[PipelineJobDefinition, ...]] = (
         memory_mib=4096,
         timeout_minutes=60,
         default_command=("--log-level", "INFO"),
-        env_keys=COMMON_ENV_KEYS,
+        env_keys=REPORTING_ENV_KEYS,
+        needs_athena=True,
     ),
     PipelineJobDefinition(
         job_name="report_round_weather_impacts",
