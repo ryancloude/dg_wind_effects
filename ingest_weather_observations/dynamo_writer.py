@@ -20,7 +20,6 @@ def _state_sk(*, round_number: int, provider: str, source_id: str) -> str:
 
 
 def _to_ddb_decimal(value: float | int | str) -> Decimal:
-    # Use string conversion to avoid binary float artifacts.
     return Decimal(str(value))
 
 
@@ -185,8 +184,11 @@ def upsert_event_weather_summary(
     event_id: int,
     run_id: str,
     silver_checkpoint_updated_at: str,
+    status: str,
     stats: dict[str, int],
     aws_region: Optional[str] = None,
+    error_type: str = "",
+    error_message: str = "",
 ) -> dict[str, Any]:
     table = _ddb_resource(aws_region).Table(table_name)
     item = {
@@ -197,6 +199,9 @@ def upsert_event_weather_summary(
         "last_run_id": run_id,
         "updated_at": utc_now_iso(),
         "last_silver_checkpoint_updated_at": silver_checkpoint_updated_at,
+        "status": status,
+        "error_type": error_type,
+        "error_message": error_message,
         **stats,
     }
     table.put_item(Item=item)
@@ -207,7 +212,7 @@ def put_weather_run_summary(
     *,
     table_name: str,
     run_id: str,
-    stats: dict[str, int],
+    stats: dict[str, Any],
     aws_region: Optional[str] = None,
 ) -> dict[str, Any]:
     table = _ddb_resource(aws_region).Table(table_name)

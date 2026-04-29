@@ -28,6 +28,10 @@ def _ddb_resource(aws_region: Optional[str]):
     return boto3.resource("dynamodb", region_name=aws_region) if aws_region else boto3.resource("dynamodb")
 
 
+def _ddb_client(aws_region: Optional[str]):
+    return boto3.client("dynamodb", region_name=aws_region) if aws_region else boto3.client("dynamodb")
+
+
 def _get_item(table, *, pk: str, sk: str) -> dict[str, Any] | None:
     resp = table.get_item(Key={"pk": pk, "sk": sk}, ConsistentRead=False)
     return resp.get("Item")
@@ -113,6 +117,63 @@ def get_event_weather_summary(
 ) -> dict[str, Any] | None:
     table = _ddb_resource(aws_region).Table(table_name)
     return _get_item(table, pk=f"EVENT#{int(event_id)}", sk="WEATHER_OBS#SUMMARY")
+
+
+def get_event_weather_summaries(
+    *,
+    table_name: str,
+    event_ids: list[int],
+    aws_region: Optional[str],
+) -> dict[int, dict[str, Any]]:
+    """
+    Batch-load WEATHER_OBS#SUMMARY items keyed by event_id.
+    """
+    client = _ddb_client(aws_region)
+    wanted_ids = sorted({int(x) for x in event_ids})
+    out: dict[int, dict[str, Any]] = {}
+
+    def _chunk(values: list[int], size: int) -> list[list[int]]:
+        return [values[i:i + size] for i in range(0, len(values), size)]
+
+    for chunk_ids in _chunk(wanted_ids, 100):
+        request_items = {
+            table_name: {
+                "Keys": [
+                    {
+                        "pk": {"S": f"EVENT#{event_id}"},
+                        "sk": {"S": "WEATHER_OBS#SUMMARY"},
+                    }
+                    for event_id in chunk_ids
+                ]
+            }
+        }
+
+        while request_items:
+            resp = client.batch_get_item(RequestItems=request_items)
+
+            for item in resp.get("Responses", {}).get(table_name, []):
+                pk = item.get("pk", {}).get("S", "")
+                event_id_text = pk.replace("EVENT#", "", 1)
+                if not event_id_text:
+                    continue
+
+                event_id = int(event_id_text)
+                out[event_id] = {
+                    "pk": pk,
+                    "sk": item.get("sk", {}).get("S", ""),
+                    "event_id": int(item.get("event_id", {}).get("N", event_id)),
+                    "pipeline": item.get("pipeline", {}).get("S", ""),
+                    "last_run_id": item.get("last_run_id", {}).get("S", ""),
+                    "updated_at": item.get("updated_at", {}).get("S", ""),
+                    "last_silver_checkpoint_updated_at": item.get("last_silver_checkpoint_updated_at", {}).get("S", ""),
+                    "status": item.get("status", {}).get("S", ""),
+                    "error_type": item.get("error_type", {}).get("S", ""),
+                    "error_message": item.get("error_message", {}).get("S", ""),
+                }
+
+            request_items = resp.get("UnprocessedKeys", {})
+
+    return out
 
 
 def get_cached_geocode(

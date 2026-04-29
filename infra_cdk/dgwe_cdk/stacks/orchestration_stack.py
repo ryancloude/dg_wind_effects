@@ -175,26 +175,16 @@ class PipelineOrchestrationStack(Stack):
         ingest_event_pages.add_catch(failure_chain, result_path="$.error_info")
 
         ingest_live_results = self._ecs_step("ingest_pdga_live_results")
-        ingest_weather = self._ecs_step("ingest_weather_observations")
-        ingest_parallel = sfn.Parallel(
-            self,
-            "PostEventPageIngestBranch",
-            result_path=sfn.JsonPath.DISCARD,
-        )
-        ingest_parallel.branch(ingest_live_results)
-        ingest_parallel.branch(ingest_weather)
-        ingest_parallel.add_catch(failure_chain, result_path="$.error_info")
+        ingest_live_results.add_catch(failure_chain, result_path="$.error_info")
 
         silver_live_results = self._ecs_step("silver_pdga_live_results")
+        silver_live_results.add_catch(failure_chain, result_path="$.error_info")
+
+        ingest_weather = self._ecs_step("ingest_weather_observations")
+        ingest_weather.add_catch(failure_chain, result_path="$.error_info")
+
         silver_weather = self._ecs_step("silver_weather_observations")
-        silver_parallel = sfn.Parallel(
-            self,
-            "SilverBranch",
-            result_path=sfn.JsonPath.DISCARD,
-        )
-        silver_parallel.branch(silver_live_results)
-        silver_parallel.branch(silver_weather)
-        silver_parallel.add_catch(failure_chain, result_path="$.error_info")
+        silver_weather.add_catch(failure_chain, result_path="$.error_info")
 
         silver_weather_enriched = self._ecs_step("silver_weather_enriched")
         silver_weather_enriched.add_catch(failure_chain, result_path="$.error_info")
@@ -240,8 +230,10 @@ class PipelineOrchestrationStack(Stack):
             initialize_context
             .next(initialize_run)
             .next(ingest_event_pages)
-            .next(ingest_parallel)
-            .next(silver_parallel)
+            .next(ingest_live_results)
+            .next(silver_live_results)
+            .next(ingest_weather)
+            .next(silver_weather)
             .next(silver_weather_enriched)
             .next(gold_wind_effects)
             .next(gold_wind_model_inputs)

@@ -10,7 +10,7 @@ from ingest_weather_observations.config import load_config
 from ingest_weather_observations.dynamo_reader import (
     WeatherEventCandidate,
     get_cached_geocode,
-    get_event_weather_summary,
+    get_event_weather_summaries,
     load_weather_event_candidates,
 )
 from ingest_weather_observations.dynamo_writer import (
@@ -49,6 +49,7 @@ class RunStats:
     attempted_events: int = 0
     processed_events: int = 0
     skipped_incremental_events: int = 0
+    skipped_failed_events: int = 0
     failed_events: int = 0
 
     attempted_round_tasks: int = 0
@@ -67,6 +68,7 @@ class RunStats:
             "attempted_events": self.attempted_events,
             "processed_events": self.processed_events,
             "skipped_incremental_events": self.skipped_incremental_events,
+            "skipped_failed_events": self.skipped_failed_events,
             "failed_events": self.failed_events,
             "attempted_round_tasks": self.attempted_round_tasks,
             "processed_round_tasks": self.processed_round_tasks,
@@ -79,10 +81,22 @@ class RunStats:
             "point_from_geocode_api": self.point_from_geocode_api,
         }
 
+    def failure_rate(self) -> float:
+        if self.attempted_events <= 0:
+            return 0.0
+        return self.failed_events / self.attempted_events
+
 
 def make_run_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"weather-observations-{ts}"
+
+
+def probability(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0.0 and 1.0")
+    return parsed
 
 
 def parse_args():
@@ -94,9 +108,16 @@ def parse_args():
     p.add_argument("--ddb-table", help="Override DDB table")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force-events", action="store_true", help="Ignore incremental summary skip and process selected events")
+    p.add_argument("--include-failed-events", action="store_true", help="Include events previously marked failed in the weather summary")
     p.add_argument("--round-padding-days", type=int, default=0, help="Date padding around inferred round date")
     p.add_argument("--timeout", type=int, default=30)
     p.add_argument("--progress-every", type=int, default=25)
+    p.add_argument(
+        "--max-failure-rate",
+        type=probability,
+        default=0.5,
+        help="Exit non-zero only when failed events are at or above this fraction of attempted events.",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -241,6 +262,43 @@ def _is_incremental_skip(
     return bool(last_silver and candidate_silver and last_silver == candidate_silver)
 
 
+def _is_failed_summary(summary_item: dict[str, Any] | None) -> bool:
+    if not summary_item:
+        return False
+    return str(summary_item.get("status", "")).strip().lower() == "failed"
+
+
+def _select_candidates_for_run(
+    *,
+    candidates: list[WeatherEventCandidate],
+    summaries_by_event_id: dict[int, dict[str, Any]],
+    mode_incremental: bool,
+    force_events: bool,
+    include_failed_events: bool,
+) -> tuple[list[WeatherEventCandidate], int, int]:
+    if not mode_incremental or force_events:
+        return candidates, 0, 0
+
+    selected: list[WeatherEventCandidate] = []
+    skipped_incremental = 0
+    skipped_failed = 0
+
+    for candidate in candidates:
+        summary_item = summaries_by_event_id.get(candidate.event_id)
+
+        if not include_failed_events and _is_failed_summary(summary_item):
+            skipped_failed += 1
+            continue
+
+        if _is_incremental_skip(candidate=candidate, summary_item=summary_item):
+            skipped_incremental += 1
+            continue
+
+        selected.append(candidate)
+
+    return selected, skipped_incremental, skipped_failed
+
+
 def _coerce_cached_point(cache_item: dict[str, Any] | None) -> GeoPoint | None:
     if not cache_item:
         return None
@@ -340,6 +398,10 @@ def _resolve_event_geopoint(
     return resolution.point, "geocode_api"
 
 
+def _should_exit_nonzero(*, stats: RunStats, max_failure_rate: float) -> bool:
+    return stats.failure_rate() >= max_failure_rate
+
+
 def main() -> int:
     args = parse_args()
 
@@ -375,14 +437,59 @@ def main() -> int:
     )
 
     logger.info(
+        "weather_candidates_loaded",
+        extra={
+            "run_id": run_id,
+            "candidate_event_count": len(candidates),
+            "mode_incremental": mode_incremental,
+            "historical_backfill": bool(args.historical_backfill),
+            "force_events": bool(args.force_events),
+            "include_failed_events": bool(args.include_failed_events),
+        },
+    )
+    print(
+        {
+            "weather_candidates_loaded": {
+                "run_id": run_id,
+                "candidate_event_count": len(candidates),
+                "mode_incremental": mode_incremental,
+                "historical_backfill": bool(args.historical_backfill),
+                "force_events": bool(args.force_events),
+                "include_failed_events": bool(args.include_failed_events),
+            }
+        }
+    )
+
+    summaries_by_event_id = get_event_weather_summaries(
+        table_name=ddb_table,
+        event_ids=[candidate.event_id for candidate in candidates],
+        aws_region=cfg.aws_region,
+    )
+
+    selected_candidates, skipped_incremental_count, skipped_failed_count = _select_candidates_for_run(
+        candidates=candidates,
+        summaries_by_event_id=summaries_by_event_id,
+        mode_incremental=mode_incremental,
+        force_events=bool(args.force_events),
+        include_failed_events=bool(args.include_failed_events),
+    )
+    stats.skipped_incremental_events = skipped_incremental_count
+    stats.skipped_failed_events = skipped_failed_count
+
+    logger.info(
         "weather_run_plan",
         extra={
             "run_id": run_id,
             "mode_incremental": mode_incremental,
             "historical_backfill": bool(args.historical_backfill),
             "candidate_event_count": len(candidates),
+            "selected_event_count": len(selected_candidates),
+            "skipped_incremental_event_count": skipped_incremental_count,
+            "skipped_failed_event_count": skipped_failed_count,
             "dry_run": bool(args.dry_run),
             "force_events": bool(args.force_events),
+            "include_failed_events": bool(args.include_failed_events),
+            "max_failure_rate": float(args.max_failure_rate),
         },
     )
     print(
@@ -392,28 +499,30 @@ def main() -> int:
                 "mode_incremental": mode_incremental,
                 "historical_backfill": bool(args.historical_backfill),
                 "candidate_event_count": len(candidates),
+                "selected_event_count": len(selected_candidates),
+                "skipped_incremental_event_count": skipped_incremental_count,
+                "skipped_failed_event_count": skipped_failed_count,
                 "dry_run": bool(args.dry_run),
                 "force_events": bool(args.force_events),
+                "include_failed_events": bool(args.include_failed_events),
+                "max_failure_rate": float(args.max_failure_rate),
             }
         }
     )
 
-    for idx, candidate in enumerate(candidates, start=1):
+    for idx, candidate in enumerate(selected_candidates, start=1):
         stats.attempted_events += 1
         event_id = candidate.event_id
+        event_stats = {
+            "attempted_round_tasks": 0,
+            "processed_round_tasks": 0,
+            "changed_round_tasks": 0,
+            "unchanged_round_tasks": 0,
+            "failed_round_tasks": 0,
+            "daylight_hours_total": 0,
+        }
 
         try:
-            summary_item = get_event_weather_summary(
-                table_name=ddb_table,
-                event_id=event_id,
-                aws_region=cfg.aws_region,
-            )
-
-            if mode_incremental and not args.force_events and _is_incremental_skip(candidate=candidate, summary_item=summary_item):
-                stats.skipped_incremental_events += 1
-                logger.info("weather_event_skipped_incremental", extra={"event_id": event_id, "run_id": run_id})
-                continue
-
             point, point_source = _resolve_event_geopoint(
                 candidate=candidate,
                 table_name=ddb_table,
@@ -440,15 +549,6 @@ def main() -> int:
                 point=point,
                 round_padding_days=max(0, int(args.round_padding_days)),
             )
-
-            event_stats = {
-                "attempted_round_tasks": 0,
-                "processed_round_tasks": 0,
-                "changed_round_tasks": 0,
-                "unchanged_round_tasks": 0,
-                "failed_round_tasks": 0,
-                "daylight_hours_total": 0,
-            }
 
             for task in round_tasks:
                 stats.attempted_round_tasks += 1
@@ -546,8 +646,14 @@ def main() -> int:
                         },
                     )
 
+            event_status = "success"
+            error_type = ""
+            error_message = ""
             if event_stats["failed_round_tasks"] > 0:
                 stats.failed_events += 1
+                event_status = "failed"
+                error_type = "round_task_failed"
+                error_message = f"{event_stats['failed_round_tasks']} round tasks failed"
             else:
                 stats.processed_events += 1
 
@@ -557,7 +663,10 @@ def main() -> int:
                     event_id=event_id,
                     run_id=run_id,
                     silver_checkpoint_updated_at=candidate.silver_checkpoint_updated_at,
+                    status=event_status,
                     stats=event_stats,
+                    error_type=error_type,
+                    error_message=error_message,
                     aws_region=cfg.aws_region,
                 )
 
@@ -567,6 +676,7 @@ def main() -> int:
                     "event_id": event_id,
                     "run_id": run_id,
                     "point_source": point_source,
+                    "event_status": event_status,
                     **event_stats,
                 },
             )
@@ -575,17 +685,39 @@ def main() -> int:
             stats.failed_events += 1
             logger.exception("weather_event_failed", extra={"event_id": event_id, "run_id": run_id, "error": str(exc)})
 
-        if idx % progress_every == 0 or idx == len(candidates):
+            if not args.dry_run:
+                upsert_event_weather_summary(
+                    table_name=ddb_table,
+                    event_id=event_id,
+                    run_id=run_id,
+                    silver_checkpoint_updated_at=candidate.silver_checkpoint_updated_at,
+                    status="failed",
+                    stats=event_stats,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    aws_region=cfg.aws_region,
+                )
+
+        if idx % progress_every == 0 or idx == len(selected_candidates):
             progress = {
                 "run_id": run_id,
                 "processed_events": idx,
-                "total_events": len(candidates),
+                "total_events": len(selected_candidates),
                 **stats.to_dict(),
+                "failure_rate": round(stats.failure_rate(), 4),
+                "max_failure_rate": float(args.max_failure_rate),
             }
             logger.info("weather_progress", extra=progress)
             print({"weather_progress": progress})
 
-    summary = {"run_id": run_id, **stats.to_dict()}
+    exit_nonzero = _should_exit_nonzero(stats=stats, max_failure_rate=float(args.max_failure_rate))
+    summary = {
+        "run_id": run_id,
+        **stats.to_dict(),
+        "failure_rate": round(stats.failure_rate(), 4),
+        "max_failure_rate": float(args.max_failure_rate),
+        "exit_nonzero": exit_nonzero,
+    }
     logger.info("weather_summary", extra=summary)
     print({"weather_summary": summary})
 
@@ -593,11 +725,11 @@ def main() -> int:
         put_weather_run_summary(
             table_name=ddb_table,
             run_id=run_id,
-            stats=stats.to_dict(),
+            stats=summary,
             aws_region=cfg.aws_region,
         )
 
-    return 0 if stats.failed_events == 0 and stats.failed_round_tasks == 0 else 2
+    return 2 if exit_nonzero else 0
 
 
 if __name__ == "__main__":
