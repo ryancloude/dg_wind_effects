@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import boto3
+from botocore.exceptions import ClientError
 
 
 def utc_now_iso() -> str:
@@ -56,7 +57,11 @@ def upsert_event_metadata(
         first_seen_at = if_not_exists(first_seen_at, :first_seen_at),
         idempotency_sha256 = :idempotency_sha256,
         raw_html_sha256 = :raw_html_sha256,
-        is_unscheduled_placeholder = :is_unscheduled_placeholder
+        is_unscheduled_placeholder = :is_unscheduled_placeholder,
+        last_fetch_status = :last_fetch_status,
+        last_fetch_failed_at = :last_fetch_failed_at,
+        last_fetch_failure_count = :last_fetch_failure_count,
+        last_fetch_failure_reason = :last_fetch_failure_reason
     """
 
     expr_attr_names = {
@@ -87,6 +92,10 @@ def upsert_event_metadata(
         ":idempotency_sha256": parsed.get("idempotency_sha256", ""),
         ":raw_html_sha256": parsed.get("raw_html_sha256", ""),
         ":is_unscheduled_placeholder": bool(parsed.get("is_unscheduled_placeholder", False)),
+        ":last_fetch_status": "success",
+        ":last_fetch_failed_at": "",
+        ":last_fetch_failure_count": 0,
+        ":last_fetch_failure_reason": "",
     }
 
     resp = table.update_item(
@@ -98,3 +107,93 @@ def upsert_event_metadata(
     )
 
     return resp.get("Attributes", {})
+
+
+def touch_event_fetch_success(
+    *,
+    table_name: str,
+    event_id: int,
+    fetched_at: str | None = None,
+    aws_region: Optional[str] = None,
+) -> bool:
+    """
+    Record a successful fetch for an existing metadata item without changing
+    the latest raw S3 object pointers. This is used for unchanged pages so
+    incremental staleness filters still work.
+    """
+    ddb = boto3.resource("dynamodb", region_name=aws_region) if aws_region else boto3.resource("dynamodb")
+    table = ddb.Table(table_name)
+
+    pk = f"EVENT#{int(event_id)}"
+    sk = "METADATA"
+    fetched_at_value = fetched_at or utc_now_iso()
+
+    try:
+        table.update_item(
+            Key={"pk": pk, "sk": sk},
+            ConditionExpression="attribute_exists(pk) AND attribute_exists(sk)",
+            UpdateExpression="""
+            SET
+                last_fetched_at = :last_fetched_at,
+                last_fetch_status = :last_fetch_status,
+                last_fetch_failed_at = :last_fetch_failed_at,
+                last_fetch_failure_count = :last_fetch_failure_count,
+                last_fetch_failure_reason = :last_fetch_failure_reason
+            """,
+            ExpressionAttributeValues={
+                ":last_fetched_at": fetched_at_value,
+                ":last_fetch_status": "success",
+                ":last_fetch_failed_at": "",
+                ":last_fetch_failure_count": 0,
+                ":last_fetch_failure_reason": "",
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def record_event_fetch_failure(
+    *,
+    table_name: str,
+    event_id: int,
+    error_message: str,
+    aws_region: Optional[str] = None,
+) -> bool:
+    """
+    Record failure metadata only for an existing metadata item. This avoids
+    creating sparse placeholder METADATA rows for unknown forward-scan IDs.
+    """
+    ddb = boto3.resource("dynamodb", region_name=aws_region) if aws_region else boto3.resource("dynamodb")
+    table = ddb.Table(table_name)
+
+    pk = f"EVENT#{int(event_id)}"
+    sk = "METADATA"
+    now = utc_now_iso()
+
+    try:
+        table.update_item(
+            Key={"pk": pk, "sk": sk},
+            ConditionExpression="attribute_exists(pk) AND attribute_exists(sk)",
+            UpdateExpression="""
+            SET
+                last_fetch_status = :last_fetch_status,
+                last_fetch_failed_at = :last_fetch_failed_at,
+                last_fetch_failure_reason = :last_fetch_failure_reason
+            ADD
+                last_fetch_failure_count :failure_increment
+            """,
+            ExpressionAttributeValues={
+                ":last_fetch_status": "failed",
+                ":last_fetch_failed_at": now,
+                ":last_fetch_failure_reason": error_message[:1000],
+                ":failure_increment": 1,
+            },
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterator, Optional
 
 import boto3
@@ -21,6 +21,24 @@ def get_existing_content_sha256(*, table_name: str, event_id: int, aws_region: O
     return item.get("idempotency_sha256")
 
 
+def _parse_utc_iso(value: str | None) -> Optional[datetime]:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def iter_rescrape_event_ids_via_gsi(
     *,
     table_name: str,
@@ -28,6 +46,8 @@ def iter_rescrape_event_ids_via_gsi(
     status_texts: list[str],
     start_date: str,
     end_before_date: str,
+    older_than_ts: str | None = None,
+    failed_older_than_ts: str | None = None,
     aws_region: Optional[str] = None,
 ) -> Iterator[int]:
     """
@@ -35,6 +55,14 @@ def iter_rescrape_event_ids_via_gsi(
       PK: status_text
       SK: end_date (YYYY-MM-DD)
     Filter target window: start_date <= end_date < end_before_date
+
+    If older_than_ts is provided, only yield candidates where:
+      - last_fetched_at is missing, or
+      - last_fetched_at < older_than_ts
+
+    If failed_older_than_ts is provided, skip candidates where:
+      - last_fetch_status == 'failed'
+      - and last_fetch_failed_at >= failed_older_than_ts
     """
     ddb = boto3.resource("dynamodb", region_name=aws_region) if aws_region else boto3.resource("dynamodb")
     table = ddb.Table(table_name)
@@ -48,13 +76,16 @@ def iter_rescrape_event_ids_via_gsi(
     if start_date > end_inclusive:
         return
 
+    older_than_dt = _parse_utc_iso(older_than_ts)
+    failed_older_than_dt = _parse_utc_iso(failed_older_than_ts)
+
     for status in wanted_statuses:
         last_evaluated_key = None
         while True:
             query_kwargs = {
                 "IndexName": gsi_name,
                 "KeyConditionExpression": Key("status_text").eq(status) & Key("end_date").between(start_date, end_inclusive),
-                "ProjectionExpression": "event_id, #pk, #sk, status_text, end_date",
+                "ProjectionExpression": "event_id, #pk, #sk, status_text, end_date, last_fetched_at, last_fetch_status, last_fetch_failed_at",
                 "ExpressionAttributeNames": {"#pk": "pk", "#sk": "sk"},
             }
             if last_evaluated_key:
@@ -65,6 +96,18 @@ def iter_rescrape_event_ids_via_gsi(
             for item in resp.get("Items", []):
                 if item.get("sk") != "METADATA":
                     continue
+
+                if older_than_dt is not None:
+                    last_fetched_dt = _parse_utc_iso(item.get("last_fetched_at"))
+                    if last_fetched_dt is not None and last_fetched_dt >= older_than_dt:
+                        continue
+
+                if failed_older_than_dt is not None:
+                    last_fetch_status = str(item.get("last_fetch_status", "")).strip().lower()
+                    last_failed_dt = _parse_utc_iso(item.get("last_fetch_failed_at"))
+                    if last_fetch_status == "failed" and last_failed_dt is not None and last_failed_dt >= failed_older_than_dt:
+                        continue
+
                 event_id = item.get("event_id")
                 if event_id is not None:
                     yield int(event_id)
@@ -102,3 +145,4 @@ def get_max_event_id(*, table_name: str, aws_region: Optional[str] = None) -> Op
             break
 
     return max_event_id
+

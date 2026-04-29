@@ -78,7 +78,6 @@ def test_get_max_event_id_returns_largest_metadata_event_id(monkeypatch):
 def test_iter_rescrape_event_ids_via_gsi_filters_and_returns_metadata_event_ids(monkeypatch):
     table = Mock()
     table.query.side_effect = [
-        # status: Sanctioned
         {
             "Items": [
                 {
@@ -106,7 +105,6 @@ def test_iter_rescrape_event_ids_via_gsi_filters_and_returns_metadata_event_ids(
                 },
             ]
         },
-        # status: Errata pending.
         {
             "Items": [
                 {
@@ -137,6 +135,112 @@ def test_iter_rescrape_event_ids_via_gsi_filters_and_returns_metadata_event_ids(
 
     assert result == [1001, 1002, 1003]
     assert table.query.call_count == 3
+
+
+def test_iter_rescrape_event_ids_via_gsi_skips_recently_fetched_items(monkeypatch):
+    table = Mock()
+    table.query.side_effect = [
+        {
+            "Items": [
+                {
+                    "event_id": 1001,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-01",
+                    "last_fetched_at": "2026-04-26T10:00:00Z",
+                },
+                {
+                    "event_id": 1002,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-02",
+                    "last_fetched_at": "2026-04-28T23:00:00Z",
+                },
+                {
+                    "event_id": 1003,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-03",
+                },
+            ]
+        }
+    ]
+
+    resource = Mock()
+    resource.Table.return_value = table
+
+    monkeypatch.setattr(dynamo_reader.boto3, "resource", lambda *args, **kwargs: resource)
+
+    result = list(
+        dynamo_reader.iter_rescrape_event_ids_via_gsi(
+            table_name="pdga-table",
+            gsi_name="gsi_status_end_date",
+            status_texts=["Sanctioned"],
+            start_date="2025-09-04",
+            end_before_date="2026-05-01",
+            older_than_ts="2026-04-27T00:00:00Z",
+            aws_region="us-east-1",
+        )
+    )
+
+    assert result == [1001, 1003]
+
+
+def test_iter_rescrape_event_ids_via_gsi_skips_recent_failures(monkeypatch):
+    table = Mock()
+    table.query.side_effect = [
+        {
+            "Items": [
+                {
+                    "event_id": 1001,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-01",
+                    "last_fetched_at": "2026-04-20T10:00:00Z",
+                    "last_fetch_status": "failed",
+                    "last_fetch_failed_at": "2026-04-29T06:00:00Z",
+                },
+                {
+                    "event_id": 1002,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-02",
+                    "last_fetched_at": "2026-04-20T10:00:00Z",
+                    "last_fetch_status": "failed",
+                    "last_fetch_failed_at": "2026-04-25T06:00:00Z",
+                },
+                {
+                    "event_id": 1003,
+                    "sk": "METADATA",
+                    "status_text": "Sanctioned",
+                    "end_date": "2026-02-03",
+                    "last_fetched_at": "2026-04-20T10:00:00Z",
+                    "last_fetch_status": "success",
+                    "last_fetch_failed_at": "",
+                },
+            ]
+        }
+    ]
+
+    resource = Mock()
+    resource.Table.return_value = table
+
+    monkeypatch.setattr(dynamo_reader.boto3, "resource", lambda *args, **kwargs: resource)
+
+    result = list(
+        dynamo_reader.iter_rescrape_event_ids_via_gsi(
+            table_name="pdga-table",
+            gsi_name="gsi_status_end_date",
+            status_texts=["Sanctioned"],
+            start_date="2025-09-04",
+            end_before_date="2026-05-01",
+            older_than_ts="2026-04-27T00:00:00Z",
+            failed_older_than_ts="2026-04-26T12:00:00Z",
+            aws_region="us-east-1",
+        )
+    )
+
+    assert result == [1002, 1003]
 
 
 def test_iter_rescrape_event_ids_via_gsi_returns_empty_when_window_invalid(monkeypatch):

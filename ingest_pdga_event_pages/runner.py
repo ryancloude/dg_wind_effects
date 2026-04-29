@@ -4,7 +4,7 @@ import argparse
 import itertools
 import logging
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable
 
 import requests
@@ -15,7 +15,11 @@ from ingest_pdga_event_pages.dynamo_reader import (
     get_max_event_id,
     iter_rescrape_event_ids_via_gsi,
 )
-from ingest_pdga_event_pages.dynamo_writer import upsert_event_metadata
+from ingest_pdga_event_pages.dynamo_writer import (
+    record_event_fetch_failure,
+    touch_event_fetch_success,
+    upsert_event_metadata,
+)
 from ingest_pdga_event_pages.event_page_parser import parse_event_page
 from ingest_pdga_event_pages.http_client import HttpConfig, build_session, get_event_page_html, polite_sleep
 from ingest_pdga_event_pages.s3_writer import put_event_page_raw
@@ -24,6 +28,8 @@ from ingest_pdga_event_pages.s3_writer import put_event_page_raw
 logger = logging.getLogger("pdga_ingest")
 
 DEFAULT_INCREMENTAL_WINDOW_DAYS = 183
+DEFAULT_INCREMENTAL_REFETCH_HOURS = 48
+DEFAULT_FAILED_REFETCH_COOLDOWN_HOURS = 72
 DEFAULT_INCREMENTAL_STATUSES = (
     "Sanctioned",
     "Event report received; official ratings pending.",
@@ -31,6 +37,8 @@ DEFAULT_INCREMENTAL_STATUSES = (
     "In progress.",
     "Errata pending.",
 )
+DEFAULT_MAX_FAILURE_RATE = 0.5
+DEFAULT_PROGRESS_EVERY = 50
 
 
 @dataclass(frozen=True)
@@ -71,11 +79,27 @@ class RunStats:
             "failed": self.failed,
         }
 
+    def attempted_total(self) -> int:
+        return self.scraped + self.not_found_404 + self.failed
+
+    def failure_rate(self) -> float:
+        attempted = self.attempted_total()
+        if attempted == 0:
+            return 0.0
+        return self.failed / attempted
+
 
 def positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be a positive integer")
+    return parsed
+
+
+def probability(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0.0 and 1.0")
     return parsed
 
 
@@ -92,6 +116,30 @@ def parse_args():
         help="Optional override for incremental statuses, comma-separated. If omitted, defaults are used.",
     )
     p.add_argument("--incremental-window-days", type=positive_int, default=DEFAULT_INCREMENTAL_WINDOW_DAYS)
+    p.add_argument(
+        "--incremental-refetch-hours",
+        type=positive_int,
+        default=DEFAULT_INCREMENTAL_REFETCH_HOURS,
+        help="Only rescrape incremental candidates when last_fetched_at is older than this many hours.",
+    )
+    p.add_argument(
+        "--failed-refetch-cooldown-hours",
+        type=positive_int,
+        default=DEFAULT_FAILED_REFETCH_COOLDOWN_HOURS,
+        help="Skip incremental rescrape for recently failed events until this many hours have passed.",
+    )
+    p.add_argument(
+        "--max-failure-rate",
+        type=probability,
+        default=DEFAULT_MAX_FAILURE_RATE,
+        help="Exit non-zero only when failed event attempts are at or above this fraction of total attempts.",
+    )
+    p.add_argument(
+        "--progress-every",
+        type=positive_int,
+        default=DEFAULT_PROGRESS_EVERY,
+        help="Emit progress every N attempted events.",
+    )
 
     p.add_argument("--bucket")
     p.add_argument("--dry-run", action="store_true")
@@ -138,6 +186,10 @@ def should_stop_backfill(streak: int, threshold: int) -> bool:
     return streak >= threshold
 
 
+def should_exit_nonzero(*, stats: RunStats, max_failure_rate: float) -> bool:
+    return stats.failure_rate() >= max_failure_rate
+
+
 def process_event(
     *,
     event_id: int,
@@ -168,6 +220,11 @@ def process_event(
 
         if unchanged:
             change_type = "unchanged"
+            touch_event_fetch_success(
+                table_name=app_cfg.ddb_table,
+                event_id=event_id,
+                aws_region=app_cfg.aws_region,
+            )
         else:
             change_type = "updated" if existing_hash else "new"
             s3_ptrs = put_event_page_raw(
@@ -220,10 +277,15 @@ def run_event_sequence(
     app_cfg,
     session,
     http_cfg: HttpConfig,
+    run_id: str,
+    progress_every: int,
 ) -> RunStats:
     stats = RunStats()
+    event_id_list = list(event_ids)
+    total_events = len(event_id_list)
+    progress_every = max(progress_every, 1)
 
-    for event_id in event_ids:
+    for idx, event_id in enumerate(event_id_list, start=1):
         try:
             result = process_event(
                 event_id=event_id,
@@ -246,6 +308,29 @@ def run_event_sequence(
         except Exception as exc:
             stats.failed += 1
             logger.exception("event_failed", extra={"event_id": event_id, "error": str(exc)})
+            if not dry_run:
+                try:
+                    record_event_fetch_failure(
+                        table_name=app_cfg.ddb_table,
+                        event_id=event_id,
+                        error_message=str(exc),
+                        aws_region=app_cfg.aws_region,
+                    )
+                except Exception:
+                    logger.exception("event_failure_metadata_write_failed", extra={"event_id": event_id})
+
+        if idx % progress_every == 0 or idx == total_events:
+            progress = {
+                "run_id": run_id,
+                "processed_events": idx,
+                "total_events": total_events,
+                "pct_complete": round((idx / total_events) * 100.0, 2) if total_events else 100.0,
+                **stats.to_dict(),
+                "attempted_total": stats.attempted_total(),
+                "failure_rate": round(stats.failure_rate(), 4),
+            }
+            logger.info("incremental_progress", extra=progress)
+            print({"incremental_progress": progress})
 
         polite_sleep(http_cfg)
 
@@ -262,9 +347,12 @@ def run_forward_scan(
     app_cfg,
     session,
     http_cfg: HttpConfig,
+    run_id: str,
+    progress_every: int,
 ) -> RunStats:
     stats = RunStats()
     no_event_streak = 0
+    progress_every = max(progress_every, 1)
 
     for event_id in itertools.count(start_event_id):
         if max_event_id is not None and event_id > max_event_id:
@@ -307,11 +395,45 @@ def run_forward_scan(
                 stats.failed += 1
                 no_event_streak = 0
                 logger.exception("event_failed", extra={"event_id": event_id, "error": str(exc)})
+                if not dry_run:
+                    try:
+                        record_event_fetch_failure(
+                            table_name=app_cfg.ddb_table,
+                            event_id=event_id,
+                            error_message=str(exc),
+                            aws_region=app_cfg.aws_region,
+                        )
+                    except Exception:
+                        logger.exception("event_failure_metadata_write_failed", extra={"event_id": event_id})
 
         except Exception as exc:
             stats.failed += 1
             no_event_streak = 0
             logger.exception("event_failed", extra={"event_id": event_id, "error": str(exc)})
+            if not dry_run:
+                try:
+                    record_event_fetch_failure(
+                        table_name=app_cfg.ddb_table,
+                        event_id=event_id,
+                        error_message=str(exc),
+                        aws_region=app_cfg.aws_region,
+                    )
+                except Exception:
+                    logger.exception("event_failure_metadata_write_failed", extra={"event_id": event_id})
+
+        attempted = stats.attempted_total()
+        if attempted > 0 and attempted % progress_every == 0:
+            progress = {
+                "run_id": run_id,
+                "mode": "forward_scan",
+                "last_event_id": event_id,
+                **stats.to_dict(),
+                "attempted_total": stats.attempted_total(),
+                "failure_rate": round(stats.failure_rate(), 4),
+                "no_event_streak": no_event_streak,
+            }
+            logger.info("forward_scan_progress", extra=progress)
+            print({"forward_scan_progress": progress})
 
         polite_sleep(http_cfg)
 
@@ -332,11 +454,18 @@ def main() -> int:
     session = build_session(http_cfg)
 
     total = RunStats()
+    run_id = f"event-pages-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    progress_every = max(args.progress_every, 1)
 
     if args.incremental:
         statuses = resolve_incremental_statuses(args)
-        today = date.today()
+        now_utc = datetime.now(timezone.utc)
+        today = now_utc.date()
         window_start = today - timedelta(days=args.incremental_window_days)
+        refetch_cutoff_dt = now_utc - timedelta(hours=args.incremental_refetch_hours)
+        failed_refetch_cutoff_dt = now_utc - timedelta(hours=args.failed_refetch_cooldown_hours)
+        refetch_cutoff_ts = refetch_cutoff_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        failed_refetch_cutoff_ts = failed_refetch_cutoff_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
         candidate_ids = list(
             iter_rescrape_event_ids_via_gsi(
@@ -345,13 +474,40 @@ def main() -> int:
                 status_texts=statuses,
                 start_date=window_start.isoformat(),
                 end_before_date=today.isoformat(),
+                older_than_ts=refetch_cutoff_ts,
+                failed_older_than_ts=failed_refetch_cutoff_ts,
                 aws_region=app_cfg.aws_region,
             )
         )
 
         candidate_count = len(candidate_ids)
-        logger.info("incremental_rescrape_candidate_count", extra={"candidate_count": candidate_count})
-        print({"incremental_rescrape_candidate_count": candidate_count})
+        logger.info(
+            "incremental_rescrape_candidate_count",
+            extra={
+                "candidate_count": candidate_count,
+                "incremental_window_days": args.incremental_window_days,
+                "incremental_refetch_hours": args.incremental_refetch_hours,
+                "failed_refetch_cooldown_hours": args.failed_refetch_cooldown_hours,
+                "incremental_statuses": statuses,
+                "window_start": window_start.isoformat(),
+                "end_before_date": today.isoformat(),
+                "older_than_ts": refetch_cutoff_ts,
+                "failed_older_than_ts": failed_refetch_cutoff_ts,
+            },
+        )
+        print(
+            {
+                "incremental_rescrape_candidate_count": candidate_count,
+                "incremental_window_days": args.incremental_window_days,
+                "incremental_refetch_hours": args.incremental_refetch_hours,
+                "failed_refetch_cooldown_hours": args.failed_refetch_cooldown_hours,
+                "incremental_statuses": statuses,
+                "window_start": window_start.isoformat(),
+                "end_before_date": today.isoformat(),
+                "older_than_ts": refetch_cutoff_ts,
+                "failed_older_than_ts": failed_refetch_cutoff_ts,
+            }
+        )
 
         rescrape_stats = run_event_sequence(
             event_ids=candidate_ids,
@@ -360,6 +516,8 @@ def main() -> int:
             app_cfg=app_cfg,
             session=session,
             http_cfg=http_cfg,
+            run_id=run_id,
+            progress_every=progress_every,
         )
         total.merge(rescrape_stats)
 
@@ -376,6 +534,8 @@ def main() -> int:
             app_cfg=app_cfg,
             session=session,
             http_cfg=http_cfg,
+            run_id=run_id,
+            progress_every=progress_every,
         )
         total.merge(forward_stats)
 
@@ -386,6 +546,9 @@ def main() -> int:
             "scraped_total": total.scraped,
             "not_found_404": total.not_found_404,
             "failed": total.failed,
+            "attempted_total": total.attempted_total(),
+            "failure_rate": round(total.failure_rate(), 4),
+            "max_failure_rate": args.max_failure_rate,
         }
         logger.info("incremental_summary", extra=summary)
         print({"incremental_summary": summary})
@@ -400,6 +563,8 @@ def main() -> int:
             app_cfg=app_cfg,
             session=session,
             http_cfg=http_cfg,
+            run_id=run_id,
+            progress_every=progress_every,
         )
         total.merge(stats)
 
@@ -411,11 +576,23 @@ def main() -> int:
             app_cfg=app_cfg,
             session=session,
             http_cfg=http_cfg,
+            run_id=run_id,
+            progress_every=progress_every,
         )
         total.merge(stats)
 
-    logger.info("summary", extra=total.to_dict())
-    return 0 if total.failed == 0 else 2
+    exit_nonzero = should_exit_nonzero(stats=total, max_failure_rate=args.max_failure_rate)
+    logger.info(
+        "summary",
+        extra={
+            **total.to_dict(),
+            "attempted_total": total.attempted_total(),
+            "failure_rate": round(total.failure_rate(), 4),
+            "max_failure_rate": args.max_failure_rate,
+            "exit_nonzero": exit_nonzero,
+        },
+    )
+    return 2 if exit_nonzero else 0
 
 
 if __name__ == "__main__":
