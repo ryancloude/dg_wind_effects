@@ -153,3 +153,13 @@ def test_runner_scores_writes_and_registers_partition(monkeypatch):
     )
     assert checkpoint_calls[0]["extra_attributes"]["athena_partition_query_execution_id"] == "qe-123"
     assert summary_calls[0]["stats"]["partitions_registered"] == 1
+
+
+def test_should_exit_nonzero_when_failure_rate_at_threshold():
+    stats = runner.RunStats(attempted_events=10, failed_events=5)
+    assert runner._should_exit_nonzero(stats=stats, max_failure_rate=0.5) is True
+
+
+def test_should_not_exit_nonzero_when_failure_rate_below_threshold():
+    stats = runner.RunStats(attempted_events=10, failed_events=4)
+    assert runner._should_exit_nonzero(stats=stats, max_failure_rate=0.5) is False

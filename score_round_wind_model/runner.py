@@ -43,10 +43,22 @@ class RunStats:
             "partitions_registered": self.partitions_registered,
         }
 
+    def failure_rate(self) -> float:
+        if self.attempted_events <= 0:
+            return 0.0
+        return self.failed_events / self.attempted_events
+
 
 def make_run_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"score-round-wind-model-{ts}"
+
+
+def probability(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0.0 and 1.0")
+    return parsed
 
 
 def parse_args():
@@ -57,6 +69,12 @@ def parse_args():
     p.add_argument("--ddb-table", help="Override DDB table")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force-events", action="store_true")
+    p.add_argument(
+        "--max-failure-rate",
+        type=probability,
+        default=0.5,
+        help="Exit non-zero only when failed events are at or above this fraction of attempted events.",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -83,8 +101,13 @@ def _event_id_from_key(key: str) -> int:
     return int(key[start:end])
 
 
+def _should_exit_nonzero(*, stats: RunStats, max_failure_rate: float) -> bool:
+    return stats.failure_rate() >= max_failure_rate
+
+
 def main() -> int:
     args = parse_args()
+    max_failure_rate = float(getattr(args, "max_failure_rate", 0.5))
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -145,7 +168,7 @@ def main() -> int:
                     not args.force_events
                     and checkpoint
                     and str(checkpoint.get("status", "")).strip().lower() == "success"
-                    and str(checkpoint.get("scoring_request_fingerprint", "")) == scoring_request_fingerprint
+                    and str(checkpoint.get("scoring_request_fingerprint", "")).strip() == scoring_request_fingerprint
                 ):
                     stats.skipped_unchanged_events += 1
                     logger.info(
@@ -303,10 +326,14 @@ def main() -> int:
                             extra={"run_id": run_id, "event_id": event_id},
                         )
 
+        exit_nonzero = _should_exit_nonzero(stats=stats, max_failure_rate=max_failure_rate)
         summary = {
             "run_id": run_id,
             "training_request_fingerprint": args.training_request_fingerprint,
             **stats.to_dict(),
+            "failure_rate": round(stats.failure_rate(), 4),
+            "max_failure_rate": max_failure_rate,
+            "exit_nonzero": exit_nonzero,
         }
         logger.info("score_round_wind_model_summary", extra=summary)
         print({"score_round_wind_model_summary": summary})
@@ -319,7 +346,7 @@ def main() -> int:
                 aws_region=cfg.aws_region,
             )
 
-        return 0 if stats.failed_events == 0 else 2
+        return 2 if exit_nonzero else 0
 
     except Exception as exc:
         logger.exception("score_round_wind_model_failed", extra={"run_id": run_id, "error": str(exc)})

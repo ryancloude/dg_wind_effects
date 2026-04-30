@@ -43,10 +43,22 @@ class RunStats:
             "hole_rows_written": self.hole_rows_written,
         }
 
+    def failure_rate(self) -> float:
+        if self.attempted_events <= 0:
+            return 0.0
+        return self.failed_events / self.attempted_events
+
 
 def make_run_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"gold-wind-effects-{ts}"
+
+
+def probability(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0.0 and 1.0")
+    return parsed
 
 
 def parse_args():
@@ -68,6 +80,12 @@ def parse_args():
         help="When run-mode=pending_only, include events with checkpoint status=dq_failed.",
     )
     p.add_argument("--progress-every", type=int, default=25)
+    p.add_argument(
+        "--max-failure-rate",
+        type=probability,
+        default=0.5,
+        help="Exit non-zero only when failed events are at or above this fraction of attempted events.",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -110,8 +128,13 @@ def _event_year(candidate: GoldEventCandidate, round_rows: list[dict], hole_rows
     return 0
 
 
+def _should_exit_nonzero(*, stats: RunStats, max_failure_rate: float) -> bool:
+    return stats.failure_rate() >= max_failure_rate
+
+
 def main() -> int:
     args = parse_args()
+    max_failure_rate = float(getattr(args, "max_failure_rate", 0.5))
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -151,6 +174,7 @@ def main() -> int:
             "selected_event_count": len(selected),
             "dry_run": bool(args.dry_run),
             "force_events": bool(args.force_events),
+            "max_failure_rate": max_failure_rate,
         },
     )
     print(
@@ -162,6 +186,7 @@ def main() -> int:
                 "selected_event_count": len(selected),
                 "dry_run": bool(args.dry_run),
                 "force_events": bool(args.force_events),
+                "max_failure_rate": max_failure_rate,
             }
         }
     )
@@ -302,11 +327,25 @@ def main() -> int:
                 logger.exception("gold_wind_effects_checkpoint_write_failed", extra={"event_id": event_id, "run_id": run_id})
 
         if idx % progress_every == 0 or idx == len(selected):
-            progress = {"run_id": run_id, "processed_events": idx, "total_events": len(selected), **stats.to_dict()}
+            progress = {
+                "run_id": run_id,
+                "processed_events": idx,
+                "total_events": len(selected),
+                **stats.to_dict(),
+                "failure_rate": round(stats.failure_rate(), 4),
+                "max_failure_rate": max_failure_rate,
+            }
             logger.info("gold_wind_effects_progress", extra=progress)
             print({"gold_wind_effects_progress": progress})
 
-    summary = {"run_id": run_id, **stats.to_dict()}
+    exit_nonzero = _should_exit_nonzero(stats=stats, max_failure_rate=max_failure_rate)
+    summary = {
+        "run_id": run_id,
+        **stats.to_dict(),
+        "failure_rate": round(stats.failure_rate(), 4),
+        "max_failure_rate": max_failure_rate,
+        "exit_nonzero": exit_nonzero,
+    }
     logger.info("gold_wind_effects_summary", extra=summary)
     print({"gold_wind_effects_summary": summary})
 
@@ -318,7 +357,7 @@ def main() -> int:
             aws_region=cfg.aws_region,
         )
 
-    return 0 if stats.failed_events == 0 else 2
+    return 2 if exit_nonzero else 0
 
 
 if __name__ == "__main__":

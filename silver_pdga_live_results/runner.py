@@ -53,10 +53,22 @@ class RunStats:
             "hole_rows_written": self.hole_rows_written,
         }
 
+    def failure_rate(self) -> float:
+        if self.attempted_events <= 0:
+            return 0.0
+        return self.failed_events / self.attempted_events
+
 
 def make_run_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"silver-live-results-{ts}"
+
+
+def probability(value: str) -> float:
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0.0 and 1.0")
+    return parsed
 
 
 def parse_args():
@@ -78,6 +90,12 @@ def parse_args():
         help="When run-mode=pending_only, include events with checkpoint status=dq_failed.",
     )
     p.add_argument("--progress-every", type=int, default=25, help="Emit progress every N events")
+    p.add_argument(
+        "--max-failure-rate",
+        type=probability,
+        default=0.5,
+        help="Exit non-zero only when failed events are at or above this fraction of attempted events.",
+    )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args()
 
@@ -155,12 +173,14 @@ def _is_pending_event(
         return bool(include_dq_failed)
 
     if status == "success":
-        # If a legacy/bad checkpoint has no fingerprint, treat as pending.
         fp = str(checkpoint.get("event_source_fingerprint", "")).strip()
         return fp == ""
 
-    # Unknown status: treat as pending so we don't silently skip.
     return True
+
+
+def _should_exit_nonzero(*, stats: RunStats, max_failure_rate: float) -> bool:
+    return stats.failure_rate() >= max_failure_rate
 
 
 def main() -> int:
@@ -169,6 +189,7 @@ def main() -> int:
     # Backward-compatible defaults for tests/mocked args that bypass argparse.
     run_mode = getattr(args, "run_mode", "pending_only")
     include_dq_failed_in_pending = bool(getattr(args, "include_dq_failed_in_pending", False))
+    max_failure_rate = float(getattr(args, "max_failure_rate", 0.5))
 
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
@@ -217,6 +238,7 @@ def main() -> int:
             "selected_event_count": len(selected_events),
             "dry_run": bool(args.dry_run),
             "force_events": bool(args.force_events),
+            "max_failure_rate": max_failure_rate,
         },
     )
     print(
@@ -229,6 +251,7 @@ def main() -> int:
                 "selected_event_count": len(selected_events),
                 "dry_run": bool(args.dry_run),
                 "force_events": bool(args.force_events),
+                "max_failure_rate": max_failure_rate,
             }
         }
     )
@@ -265,7 +288,6 @@ def main() -> int:
                 aws_region=cfg.aws_region,
             )
 
-            # Skip unchanged only when prior run was successful for this exact fingerprint.
             if (
                 not args.force_events
                 and checkpoint
@@ -407,11 +429,20 @@ def main() -> int:
                 "processed_events": idx,
                 "total_events": len(selected_events),
                 **stats.to_dict(),
+                "failure_rate": round(stats.failure_rate(), 4),
+                "max_failure_rate": max_failure_rate,
             }
             logger.info("silver_progress", extra=progress)
             print({"silver_progress": progress})
 
-    summary = {"run_id": run_id, **stats.to_dict()}
+    exit_nonzero = _should_exit_nonzero(stats=stats, max_failure_rate=max_failure_rate)
+    summary = {
+        "run_id": run_id,
+        **stats.to_dict(),
+        "failure_rate": round(stats.failure_rate(), 4),
+        "max_failure_rate": max_failure_rate,
+        "exit_nonzero": exit_nonzero,
+    }
     logger.info("silver_summary", extra=summary)
     print({"silver_summary": summary})
 
@@ -423,7 +454,7 @@ def main() -> int:
             aws_region=cfg.aws_region,
         )
 
-    return 0 if stats.failed_events == 0 else 2
+    return 2 if exit_nonzero else 0
 
 
 if __name__ == "__main__":
