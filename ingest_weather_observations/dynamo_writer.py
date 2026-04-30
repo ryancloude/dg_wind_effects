@@ -23,6 +23,24 @@ def _to_ddb_decimal(value: float | int | str) -> Decimal:
     return Decimal(str(value))
 
 
+def _to_ddb_compatible(value: Any) -> Any:
+    """
+    Recursively convert Python values into DynamoDB-compatible values.
+
+    In particular, boto3's DynamoDB serializer rejects native Python floats,
+    so we convert them to Decimal via string conversion.
+    """
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, list):
+        return [_to_ddb_compatible(x) for x in value]
+    if isinstance(value, tuple):
+        return [_to_ddb_compatible(x) for x in value]
+    if isinstance(value, dict):
+        return {k: _to_ddb_compatible(v) for k, v in value.items()}
+    return value
+
+
 def get_existing_weather_state(
     *,
     table_name: str,
@@ -204,7 +222,7 @@ def upsert_event_weather_summary(
         "error_message": error_message,
         **stats,
     }
-    table.put_item(Item=item)
+    table.put_item(Item=_to_ddb_compatible(item))
     return item
 
 
@@ -223,5 +241,5 @@ def put_weather_run_summary(
         "created_at": utc_now_iso(),
         **stats,
     }
-    table.put_item(Item=item)
+    table.put_item(Item=_to_ddb_compatible(item))
     return item
