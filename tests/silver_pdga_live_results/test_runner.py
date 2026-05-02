@@ -47,7 +47,12 @@ def test_is_pending_event_skips_dq_failed_by_default():
         }
     }
 
-    pending = _is_pending_event(event, checkpoints, include_dq_failed=False)
+    pending = _is_pending_event(
+        event,
+        checkpoints,
+        include_failed=False,
+        include_dq_failed=False,
+    )
     assert pending is False
 
 
@@ -60,7 +65,12 @@ def test_is_pending_event_includes_dq_failed_when_enabled():
         }
     }
 
-    pending = _is_pending_event(event, checkpoints, include_dq_failed=True)
+    pending = _is_pending_event(
+        event,
+        checkpoints,
+        include_failed=False,
+        include_dq_failed=True,
+    )
     assert pending is True
 
 
@@ -73,7 +83,12 @@ def test_is_pending_event_skips_success_with_fingerprint():
         }
     }
 
-    pending = _is_pending_event(event, checkpoints, include_dq_failed=False)
+    pending = _is_pending_event(
+        event,
+        checkpoints,
+        include_failed=False,
+        include_dq_failed=False,
+    )
     assert pending is False
 
 
@@ -86,11 +101,16 @@ def test_is_pending_event_includes_success_with_blank_fingerprint():
         }
     }
 
-    pending = _is_pending_event(event, checkpoints, include_dq_failed=False)
+    pending = _is_pending_event(
+        event,
+        checkpoints,
+        include_failed=False,
+        include_dq_failed=False,
+    )
     assert pending is True
 
 
-def test_is_pending_event_includes_failed():
+def test_is_pending_event_skips_failed_by_default():
     event = {"event_id": 90008}
     checkpoints = {
         90008: {
@@ -99,7 +119,30 @@ def test_is_pending_event_includes_failed():
         }
     }
 
-    pending = _is_pending_event(event, checkpoints, include_dq_failed=False)
+    pending = _is_pending_event(
+        event,
+        checkpoints,
+        include_failed=False,
+        include_dq_failed=False,
+    )
+    assert pending is False
+
+
+def test_is_pending_event_includes_failed_when_enabled():
+    event = {"event_id": 90008}
+    checkpoints = {
+        90008: {
+            "status": "failed",
+            "event_source_fingerprint": "fp1",
+        }
+    }
+
+    pending = _is_pending_event(
+        event,
+        checkpoints,
+        include_failed=True,
+        include_dq_failed=False,
+    )
     assert pending is True
 
 
@@ -112,7 +155,12 @@ def test_is_pending_event_includes_unknown_status():
         }
     }
 
-    pending = _is_pending_event(event, checkpoints, include_dq_failed=False)
+    pending = _is_pending_event(
+        event,
+        checkpoints,
+        include_failed=False,
+        include_dq_failed=False,
+    )
     assert pending is True
 
 
@@ -126,7 +174,7 @@ def test_should_not_exit_nonzero_when_failure_rate_below_threshold():
     assert _should_exit_nonzero(stats=stats, max_failure_rate=0.5) is False
 
 
-def test_main_returns_zero_when_failure_rate_below_threshold(monkeypatch):
+def test_main_returns_two_when_failure_rate_at_threshold(monkeypatch):
     args = SimpleNamespace(
         event_ids=None,
         bucket=None,
@@ -134,6 +182,7 @@ def test_main_returns_zero_when_failure_rate_below_threshold(monkeypatch):
         dry_run=True,
         force_events=False,
         run_mode="pending_only",
+        include_failed_events=False,
         include_dq_failed_in_pending=False,
         progress_every=25,
         max_failure_rate=0.5,
@@ -179,7 +228,7 @@ def test_main_returns_zero_when_failure_rate_below_threshold(monkeypatch):
     monkeypatch.setattr(runner, "print", lambda obj: None, raising=False)
 
     exit_code = runner.main()
-    assert exit_code == 2  # 1 failed out of 2 attempted == 0.5 threshold
+    assert exit_code == 2
 
 
 def test_main_returns_zero_when_failure_rate_is_small(monkeypatch):
@@ -190,6 +239,7 @@ def test_main_returns_zero_when_failure_rate_is_small(monkeypatch):
         dry_run=True,
         force_events=False,
         run_mode="pending_only",
+        include_failed_events=False,
         include_dq_failed_in_pending=False,
         progress_every=25,
         max_failure_rate=0.5,
@@ -236,4 +286,4 @@ def test_main_returns_zero_when_failure_rate_is_small(monkeypatch):
     monkeypatch.setattr(runner, "print", lambda obj: None, raising=False)
 
     exit_code = runner.main()
-    assert exit_code == 0  # 1 failed out of 3 attempted < 0.5
+    assert exit_code == 0

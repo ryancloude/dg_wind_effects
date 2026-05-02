@@ -85,6 +85,11 @@ def parse_args():
         help="pending_only: process only events without success checkpoints; full_check: evaluate all candidates",
     )
     p.add_argument(
+        "--include-failed-events",
+        action="store_true",
+        help="When run-mode=pending_only, include events with checkpoint status=failed.",
+    )
+    p.add_argument(
         "--include-dq-failed-in-pending",
         action="store_true",
         help="When run-mode=pending_only, include events with checkpoint status=dq_failed.",
@@ -157,6 +162,7 @@ def _is_pending_event(
     event_metadata: dict[str, Any],
     checkpoints: dict[int, dict[str, Any]],
     *,
+    include_failed: bool,
     include_dq_failed: bool,
 ) -> bool:
     event_id = int(event_metadata["event_id"])
@@ -166,16 +172,21 @@ def _is_pending_event(
 
     status = str(checkpoint.get("status", "")).strip().lower()
 
-    if status in ("failed", ""):
+    if status in ("",):
         return True
+
+    if status == "failed":
+        return bool(include_failed)
 
     if status == "dq_failed":
         return bool(include_dq_failed)
 
     if status == "success":
+        # If a legacy/bad checkpoint has no fingerprint, treat as pending.
         fp = str(checkpoint.get("event_source_fingerprint", "")).strip()
         return fp == ""
 
+    # Unknown status: treat as pending so we don't silently skip.
     return True
 
 
@@ -188,6 +199,7 @@ def main() -> int:
 
     # Backward-compatible defaults for tests/mocked args that bypass argparse.
     run_mode = getattr(args, "run_mode", "pending_only")
+    include_failed_events = bool(getattr(args, "include_failed_events", False))
     include_dq_failed_in_pending = bool(getattr(args, "include_dq_failed_in_pending", False))
     max_failure_rate = float(getattr(args, "max_failure_rate", 0.5))
 
@@ -224,6 +236,7 @@ def main() -> int:
             if _is_pending_event(
                 event,
                 checkpoints,
+                include_failed=include_failed_events,
                 include_dq_failed=include_dq_failed_in_pending,
             )
         ]
@@ -233,6 +246,7 @@ def main() -> int:
         extra={
             "run_id": run_id,
             "run_mode": run_mode,
+            "include_failed_events": include_failed_events,
             "include_dq_failed_in_pending": include_dq_failed_in_pending,
             "candidate_event_count": len(candidate_events),
             "selected_event_count": len(selected_events),
@@ -246,6 +260,7 @@ def main() -> int:
             "silver_run_plan": {
                 "run_id": run_id,
                 "run_mode": run_mode,
+                "include_failed_events": include_failed_events,
                 "include_dq_failed_in_pending": include_dq_failed_in_pending,
                 "candidate_event_count": len(candidate_events),
                 "selected_event_count": len(selected_events),
@@ -288,6 +303,7 @@ def main() -> int:
                 aws_region=cfg.aws_region,
             )
 
+            # Skip unchanged only when prior run was successful for this exact fingerprint.
             if (
                 not args.force_events
                 and checkpoint

@@ -13,6 +13,26 @@ def _candidate():
     )
 
 
+def test_is_pending_event_skips_failed_by_default():
+    pending = runner._is_pending_event(
+        90008,
+        {90008: {"status": "failed", "event_source_fingerprint": "fp-1"}},
+        include_failed=False,
+        include_dq_failed=False,
+    )
+    assert pending is False
+
+
+def test_is_pending_event_includes_failed_when_enabled():
+    pending = runner._is_pending_event(
+        90008,
+        {90008: {"status": "failed", "event_source_fingerprint": "fp-1"}},
+        include_failed=True,
+        include_dq_failed=False,
+    )
+    assert pending is True
+
+
 def test_main_pending_only_skips_success_with_same_fingerprint(monkeypatch):
     args = SimpleNamespace(
         event_ids=None,
@@ -21,6 +41,7 @@ def test_main_pending_only_skips_success_with_same_fingerprint(monkeypatch):
         dry_run=True,
         force_events=False,
         run_mode="pending_only",
+        include_failed_events=False,
         include_dq_failed_in_pending=False,
         progress_every=10,
         log_level="INFO",
@@ -65,6 +86,7 @@ def test_main_full_check_processes_success(monkeypatch):
         dry_run=False,
         force_events=False,
         run_mode="full_check",
+        include_failed_events=False,
         include_dq_failed_in_pending=False,
         progress_every=10,
         log_level="INFO",

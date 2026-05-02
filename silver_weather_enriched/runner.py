@@ -85,6 +85,11 @@ def parse_args():
         help="pending_only: process events without success checkpoint; full_check: evaluate all candidates",
     )
     p.add_argument(
+        "--include-failed-events",
+        action="store_true",
+        help="When run-mode=pending_only, include events with checkpoint status=failed.",
+    )
+    p.add_argument(
         "--include-dq-failed-in-pending",
         action="store_true",
         help="When run-mode=pending_only, include events with checkpoint status=dq_failed.",
@@ -106,14 +111,22 @@ def parse_event_ids(raw: str | None) -> list[int] | None:
     return [int(x.strip()) for x in raw.split(",") if x.strip()]
 
 
-def _is_pending_event(event_id: int, checkpoints: dict[int, dict], *, include_dq_failed: bool) -> bool:
+def _is_pending_event(
+    event_id: int,
+    checkpoints: dict[int, dict],
+    *,
+    include_failed: bool,
+    include_dq_failed: bool,
+) -> bool:
     checkpoint = checkpoints.get(event_id)
     if not checkpoint:
         return True
 
     status = str(checkpoint.get("status", "")).strip().lower()
-    if status in ("failed", ""):
+    if status == "":
         return True
+    if status == "failed":
+        return bool(include_failed)
     if status == "dq_failed":
         return bool(include_dq_failed)
     if status == "success":
@@ -144,6 +157,9 @@ def _should_exit_nonzero(*, stats: RunStats, max_failure_rate: float) -> bool:
 
 def main() -> int:
     args = parse_args()
+    run_mode = getattr(args, "run_mode", "pending_only")
+    include_failed_events = bool(getattr(args, "include_failed_events", False))
+    include_dq_failed_in_pending = bool(getattr(args, "include_dq_failed_in_pending", False))
     max_failure_rate = float(getattr(args, "max_failure_rate", 0.5))
 
     logging.basicConfig(
@@ -167,7 +183,7 @@ def main() -> int:
     )
 
     selected = candidates
-    if event_ids is None and args.run_mode == "pending_only":
+    if event_ids is None and run_mode == "pending_only":
         checkpoints = load_enriched_event_checkpoints(table_name=ddb_table, aws_region=cfg.aws_region)
         selected = [
             c
@@ -175,7 +191,8 @@ def main() -> int:
             if _is_pending_event(
                 c.event_id,
                 checkpoints,
-                include_dq_failed=bool(args.include_dq_failed_in_pending),
+                include_failed=include_failed_events,
+                include_dq_failed=include_dq_failed_in_pending,
             )
         ]
 
@@ -183,7 +200,9 @@ def main() -> int:
         "silver_weather_enriched_run_plan",
         extra={
             "run_id": run_id,
-            "run_mode": args.run_mode,
+            "run_mode": run_mode,
+            "include_failed_events": include_failed_events,
+            "include_dq_failed_in_pending": include_dq_failed_in_pending,
             "candidate_event_count": len(candidates),
             "selected_event_count": len(selected),
             "dry_run": bool(args.dry_run),
@@ -195,7 +214,9 @@ def main() -> int:
         {
             "silver_weather_enriched_run_plan": {
                 "run_id": run_id,
-                "run_mode": args.run_mode,
+                "run_mode": run_mode,
+                "include_failed_events": include_failed_events,
+                "include_dq_failed_in_pending": include_dq_failed_in_pending,
                 "candidate_event_count": len(candidates),
                 "selected_event_count": len(selected),
                 "dry_run": bool(args.dry_run),

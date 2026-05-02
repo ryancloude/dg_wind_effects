@@ -70,6 +70,11 @@ def parse_args():
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force-events", action="store_true")
     p.add_argument(
+        "--include-failed-events",
+        action="store_true",
+        help="Include events with score checkpoints in failed status.",
+    )
+    p.add_argument(
         "--max-failure-rate",
         type=probability,
         default=0.5,
@@ -101,12 +106,36 @@ def _event_id_from_key(key: str) -> int:
     return int(key[start:end])
 
 
+def _should_skip_event(
+    *,
+    checkpoint: dict | None,
+    scoring_request_fingerprint: str,
+    force_events: bool,
+    include_failed: bool,
+) -> tuple[bool, str]:
+    if force_events or not checkpoint:
+        return False, ""
+
+    status = str(checkpoint.get("status", "")).strip().lower()
+    if status == "success":
+        checkpoint_fp = str(checkpoint.get("scoring_request_fingerprint", "")).strip()
+        if checkpoint_fp == scoring_request_fingerprint:
+            return True, "unchanged_success"
+        return False, ""
+
+    if status == "failed" and not include_failed:
+        return True, "previous_failed"
+
+    return False, ""
+
+
 def _should_exit_nonzero(*, stats: RunStats, max_failure_rate: float) -> bool:
     return stats.failure_rate() >= max_failure_rate
 
 
 def main() -> int:
     args = parse_args()
+    include_failed_events = bool(getattr(args, "include_failed_events", False))
     max_failure_rate = float(getattr(args, "max_failure_rate", 0.5))
 
     logging.basicConfig(
@@ -147,8 +176,33 @@ def main() -> int:
             extra={"event_object_count": len(event_objects)},
         )
 
+        logger.info(
+            "score_round_wind_model_run_plan",
+            extra={
+                "run_id": run_id,
+                "training_request_fingerprint": args.training_request_fingerprint,
+                "candidate_event_count": len(event_objects),
+                "include_failed_events": include_failed_events,
+                "dry_run": bool(args.dry_run),
+                "force_events": bool(args.force_events),
+                "max_failure_rate": max_failure_rate,
+            },
+        )
+        print(
+            {
+                "score_round_wind_model_run_plan": {
+                    "run_id": run_id,
+                    "training_request_fingerprint": args.training_request_fingerprint,
+                    "candidate_event_count": len(event_objects),
+                    "include_failed_events": include_failed_events,
+                    "dry_run": bool(args.dry_run),
+                    "force_events": bool(args.force_events),
+                    "max_failure_rate": max_failure_rate,
+                }
+            }
+        )
+
         for event_object in event_objects:
-            stats.attempted_events += 1
             event_id = _event_id_from_key(event_object["key"])
 
             try:
@@ -164,12 +218,14 @@ def main() -> int:
                     aws_region=cfg.aws_region,
                 )
 
-                if (
-                    not args.force_events
-                    and checkpoint
-                    and str(checkpoint.get("status", "")).strip().lower() == "success"
-                    and str(checkpoint.get("scoring_request_fingerprint", "")).strip() == scoring_request_fingerprint
-                ):
+                should_skip, skip_reason = _should_skip_event(
+                    checkpoint=checkpoint,
+                    scoring_request_fingerprint=scoring_request_fingerprint,
+                    force_events=bool(args.force_events),
+                    include_failed=include_failed_events,
+                )
+
+                if should_skip and skip_reason == "unchanged_success":
                     stats.skipped_unchanged_events += 1
                     logger.info(
                         "score_round_wind_model_event_skipped_unchanged",
@@ -180,6 +236,19 @@ def main() -> int:
                         },
                     )
                     continue
+
+                if should_skip and skip_reason == "previous_failed":
+                    logger.info(
+                        "score_round_wind_model_event_skipped_failed",
+                        extra={
+                            "run_id": run_id,
+                            "event_id": event_id,
+                            "training_request_fingerprint": args.training_request_fingerprint,
+                        },
+                    )
+                    continue
+
+                stats.attempted_events += 1
 
                 t_event_load = time.perf_counter()
                 df = load_event_dataframe(

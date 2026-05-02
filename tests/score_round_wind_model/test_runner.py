@@ -10,6 +10,28 @@ class FakeModel:
     pass
 
 
+def test_should_skip_failed_checkpoint_by_default():
+    should_skip, reason = runner._should_skip_event(
+        checkpoint={"status": "failed", "scoring_request_fingerprint": "score-fp"},
+        scoring_request_fingerprint="score-fp",
+        force_events=False,
+        include_failed=False,
+    )
+    assert should_skip is True
+    assert reason == "previous_failed"
+
+
+def test_should_include_failed_checkpoint_when_enabled():
+    should_skip, reason = runner._should_skip_event(
+        checkpoint={"status": "failed", "scoring_request_fingerprint": "score-fp"},
+        scoring_request_fingerprint="score-fp",
+        force_events=False,
+        include_failed=True,
+    )
+    assert should_skip is False
+    assert reason == ""
+
+
 def test_runner_skips_existing_success(monkeypatch):
     args = SimpleNamespace(
         training_request_fingerprint="train-fp",
@@ -18,6 +40,7 @@ def test_runner_skips_existing_success(monkeypatch):
         ddb_table=None,
         dry_run=True,
         force_events=False,
+        include_failed_events=False,
         log_level="INFO",
     )
 
@@ -74,6 +97,7 @@ def test_runner_scores_writes_and_registers_partition(monkeypatch):
         ddb_table=None,
         dry_run=False,
         force_events=False,
+        include_failed_events=False,
         log_level="INFO",
     )
 
